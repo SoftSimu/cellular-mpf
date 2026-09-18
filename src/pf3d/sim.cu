@@ -1044,10 +1044,12 @@ bool Sim3D::initialize_fields() {
                 initialization_hash = diagnostics.table_fnv1a64;
                 std::printf(
                     "  channel centres %s, minimum xy-periodic distance %.4f, "
-                    "table hash %016llx\n",
+                    "table hash %016llx, placement=%s\n",
                     options_.initial_centres_path.c_str(),
                     diagnostics.minimum_periodic_distance,
-                    static_cast<unsigned long long>(initialization_hash));
+                    static_cast<unsigned long long>(initialization_hash),
+                    diagnostics.channel_box_declared
+                        ? "geometry-pinned" : "sequential");
             }
         }
     } else if (options_.initial_centres_path.empty()) {

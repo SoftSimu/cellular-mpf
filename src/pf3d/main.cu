@@ -55,6 +55,8 @@ void usage(const char* program) {
         "  --polarity-seed <u64>     polarity/tumble stream; 0 follows --seed (0)\n"
         "  --initial-centres <csv>   periodic/multilayer channel: id,x,y,z;\n"
         "                            slab/one-layer channel: id,x,y\n"
+        "                            channel tables may declare # channel_box=L,H\n"
+        "                            to import unanchored positions (see docs)\n"
         "\n"
         "integration and storage\n"
         "  --dt <f>                  explicit-Euler time step                (0.01)\n"

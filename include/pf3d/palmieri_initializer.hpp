@@ -46,6 +46,7 @@ struct PalmieriCentres3DCsvDiagnostics {
     std::size_t accepted_count = 0;
     double minimum_periodic_distance = std::numeric_limits<double>::infinity();
     std::uint64_t table_fnv1a64 = 0;
+    bool channel_box_declared = false;
 };
 
 inline void palmieri3d_set_error(std::string* error,
@@ -412,7 +413,7 @@ inline bool channel3d_validate_centres(
     const std::vector<float>& x, const std::vector<float>& y,
     const std::vector<float>& z, int expected_n, double side, int height,
     double radius, PalmieriCentres3DCsvDiagnostics* diag,
-    std::string* error) {
+    std::string* error, bool require_centered_cell = true) {
     if (expected_n < 1 || !(side > 0.0) || height <= 0 || !(radius > 0.0)) {
         palmieri3d_set_error(error,
                              "invalid channel centre-table validation parameters");
@@ -426,7 +427,8 @@ inline bool channel3d_validate_centres(
     }
     const float expected_xy = static_cast<float>(0.5 * side);
     const float expected_z = static_cast<float>(0.5 * height);
-    if (x[0] != expected_xy || y[0] != expected_xy || z[0] != expected_z) {
+    if (require_centered_cell &&
+        (x[0] != expected_xy || y[0] != expected_xy || z[0] != expected_z)) {
         palmieri3d_set_error(error,
                              "global_id 0 is not exactly at the channel centre");
         return false;
@@ -499,12 +501,36 @@ inline bool channel3d_read_centres_csv(
             "CSV header must be exactly global_id,x,y,z with LF line endings");
         return false;
     }
+    // A geometry-pinned table may transfer an existing arrangement without
+    // moving cell zero to the centre. Wall clearance and separation still apply.
+    if (!std::getline(in, line)) {
+        palmieri3d_set_error(error, "channel centre CSV has no data rows");
+        return false;
+    }
+    constexpr const char* box_prefix = "# channel_box=";
+    const bool box_declared = line.rfind(box_prefix, 0) == 0;
+    if (box_declared) {
+        const std::size_t comma = line.find(',');
+        const std::size_t begin = std::char_traits<char>::length(box_prefix);
+        int declared_side = 0, declared_height = 0;
+        if (comma == std::string::npos || comma < begin ||
+            !palmieri3d_parse_int(line.data() + begin, line.data() + comma,
+                                  &declared_side) ||
+            !palmieri3d_parse_int(line.data() + comma + 1,
+                                  line.data() + line.size(), &declared_height) ||
+            declared_side <= 0 || declared_height <= 0 ||
+            declared_side != side || declared_height != height) {
+            palmieri3d_set_error(error,
+                "channel_box must equal the target integer L,H");
+            return false;
+        }
+    }
     x->clear(); y->clear(); z->clear();
     x->reserve(static_cast<std::size_t>(expected_n));
     y->reserve(static_cast<std::size_t>(expected_n));
     z->reserve(static_cast<std::size_t>(expected_n));
     for (int expected_id = 0; expected_id < expected_n; ++expected_id) {
-        if (!std::getline(in, line)) {
+        if ((box_declared || expected_id != 0) && !std::getline(in, line)) {
             palmieri3d_set_error(error, "centre CSV ended before expected N rows");
             return false;
         }
@@ -541,8 +567,11 @@ inline bool channel3d_read_centres_csv(
                              "centre CSV has extra rows or an I/O failure");
         return false;
     }
-    return channel3d_validate_centres(*x, *y, *z, expected_n, side, height,
-                                      radius, diag, error);
+    const bool valid = channel3d_validate_centres(
+        *x, *y, *z, expected_n, side, height, radius, diag, error,
+        !box_declared);
+    if (valid && diag) diag->channel_box_declared = box_declared;
+    return valid;
 }
 
 }  // namespace pf3d

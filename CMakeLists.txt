@@ -457,6 +457,16 @@ if(BUILD_TESTING)
     add_test(NAME pf3d_tile_partition_cpu
       COMMAND pf3d_tile_partition_cpu_test)
 
+    add_executable(pf3d_channel_centres_cpu_test
+      tests/3d/channel_centres_cpu_test.cpp)
+    target_include_directories(pf3d_channel_centres_cpu_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/common)
+    pf_enable_warnings(pf3d_channel_centres_cpu_test)
+    add_test(NAME pf3d_channel_centres_cpu COMMAND pf3d_channel_centres_cpu_test)
+    add_test(NAME pf3d_stack_centres_python
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/stack_centres_test.py)
+
     add_executable(pf3d_bounded_z_map_cpu_test
       tests/3d/bounded_z_map_cpu_test.cpp)
     target_include_directories(pf3d_bounded_z_map_cpu_test PRIVATE
@@ -709,6 +719,7 @@ if(TARGET palmieri_centres_3d)
 endif()
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/relaxed_2d_to_slab_centres.py)
   install(PROGRAMS tools/relaxed_2d_to_slab_centres.py DESTINATION bin)
+  install(PROGRAMS tools/stack_channel_centres.py DESTINATION bin)
 endif()
 install(PROGRAMS tools/render_pf3d_slab.py DESTINATION bin)
 install(PROGRAMS tools/velocity_moments.py DESTINATION bin)

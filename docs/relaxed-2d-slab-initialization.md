@@ -126,3 +126,52 @@ lateral box, transfers only
 IDs/x/y, places fresh spheres at `z=H/2`, and then relaxes them in 3D. This
 path is restricted to `H=ceil(2R)` and must not be copied into multiple z
 layers; multilayer channels use genuine `global_id,x,y,z` initialization.
+
+## Stacked channel arrangements
+
+A three-dimensional channel table may opt into unanchored cell positions by
+declaring its exact lateral side and physical wall gap immediately after the
+header:
+
+```text
+global_id,x,y,z
+# channel_box=916,196
+0,100,150,49
+1,300,450,147
+```
+
+Supply all `N` rows in global-ID order. The example above illustrates the
+format, not a complete N=200 input. Coordinates use periodic `x,y` in `[0,L)`
+and physical `z` above the lower wall. Radius clearance from both walls and
+minimum centre separation `R` are still checked. The declaration only removes
+the sequential initializer's requirement that cell zero be at the box centre;
+tables without it retain the original strict convention.
+
+This imports positions, not phase fields or a continuation state. Use distinct
+arrangements or independently translated layers to avoid repeated vertical
+columns, assign unique IDs, and passively relax the fresh full-sphere fields.
+Stacking provides a preparation protocol, not evidence of an equilibrated or
+isotropic multilayer. Record the source configurations and transforms, justify
+the layer spacing from the intended loading and measured cell organization,
+and inspect the relaxed vertical profile. Do not copy random states between
+new cells. The ordinary fresh initializer assigns their polarities from their
+unique IDs and the chosen polarity seed.
+
+`tools/stack_channel_centres.py` assembles such a table from two or more
+distinct passive one-layer checkpoints:
+
+```bash
+python3 tools/stack_channel_centres.py \
+  --checkpoint layer-a.pf3d --checkpoint layer-b.pf3d \
+  --seed 1234 --layer-pitch 98 --output stacked.csv
+```
+
+It preserves the lateral box, independently translates each parent arrangement,
+and assigns contiguous new IDs. The integer wall gap is
+`ceil(2R + (layers-1)*pitch)`; the realized pitch is reported. The JSON companion
+contains source metadata fingerprints, translations, spacing statistics and a
+`rho_argument` that reproduces the exact lateral box under the solver's integer
+sizing rule. The tool reads cell records, not the large phase arrays: it checks
+metadata/layout but does not certify the checkpoint's full-file CRC. Use
+previously validated, immutable parent checkpoints. New fields still require
+passive relaxation; the source elapsed time is not transferred.
