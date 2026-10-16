@@ -167,6 +167,10 @@ Sim3D::~Sim3D() {
         boundary_output_->close(false);
         boundary_output_.reset();
     }
+    if (surface_output_) {
+        surface_output_->close(false);
+        surface_output_.reset();
+    }
     clear_phase_events();
     if (bench_start_) cudaEventDestroy(bench_start_);
     if (bench_stop_) cudaEventDestroy(bench_stop_);
@@ -1213,6 +1217,27 @@ bool Sim3D::initialize_common() {
             }
         }
     }
+    if (!options_.surface_path.empty()) {
+        if (options_.surface_interval <= 0 || options_.bench_steps > 0) {
+            std::fprintf(stderr, "[3d] surface output requires a positive cadence and no --bench\n");
+            return false;
+        }
+        const auto path = std::filesystem::weakly_canonical(options_.surface_path);
+        for (const auto& other : {options_.trajectory_path, options_.boundary_path})
+            if (!other.empty() && path == std::filesystem::weakly_canonical(other)) {
+                std::fprintf(stderr, "[3d] surface, boundary, and trajectory paths must differ\n");
+                return false;
+            }
+        if (!options_.checkpoint_dir.empty() &&
+            path.parent_path() == std::filesystem::weakly_canonical(options_.checkpoint_dir)) {
+            const auto name = path.filename().string();
+            if (name == "checkpoint.pf3d" ||
+                (name.rfind("checkpoint_", 0) == 0 && path.extension() == ".pf3d")) {
+                std::fprintf(stderr, "[3d] surface output must not use a checkpoint filename\n");
+                return false;
+            }
+        }
+    }
     if (!options_.trajectory_path.empty() && !open_trajectory()) return false;
     // Seed a newly created trajectory at the initialized state. An existing
     // compatible trajectory keeps its absolute sampling grid across resumes.
@@ -1225,7 +1250,26 @@ bool Sim3D::initialize_common() {
                 static_cast<std::uint64_t>(options_.boundary_interval),
                 options_.boundary_compress) || !append_boundary()) return false;
     }
+    if (!options_.surface_path.empty()) {
+        surface_output_ = std::make_unique<SurfaceOutput3D>();
+        if (!surface_output_->open(options_.surface_path, params_,
+                static_cast<std::uint64_t>(options_.surface_interval),
+                options_.surface_compress) || !append_surface()) return false;
+    }
     return true;
+}
+
+SurfaceDeviceView3D Sim3D::surface_view() const {
+    return {options_.device, current_phi(), d_promoted_phi_[current_promoted_phi_index_],
+            d_cells_, B_, field_storage_, selection_, stream_};
+}
+
+bool Sim3D::append_surface() {
+    if (!surface_output_) return true;
+    const bool ok = capture_surfaces_ ? capture_surfaces_(*surface_output_)
+        : surface_output_->capture({surface_view()}, steps_done_, time());
+    if (ok) last_surface_step_ = steps_done_;
+    return ok;
 }
 
 bool Sim3D::append_boundary() {
@@ -2177,6 +2221,9 @@ bool Sim3D::run() {
     const std::uint64_t boundary_every = boundary_output_
         ? static_cast<std::uint64_t>(options_.boundary_interval) : 0;
     std::uint64_t next_boundary = schedule_grid_after(steps_done_, boundary_every);
+    const std::uint64_t surface_every = surface_output_
+        ? static_cast<std::uint64_t>(options_.surface_interval) : 0;
+    std::uint64_t next_surface = schedule_grid_after(steps_done_, surface_every);
     int since_poll = 0;
 
     while (steps_done_ < target && !terminate_requested) {
@@ -2189,6 +2236,7 @@ bool Sim3D::run() {
                            steps_done_ >= next_verify ||
                            steps_done_ >= next_compaction ||
                            steps_done_ >= next_boundary ||
+                           steps_done_ >= next_surface ||
                            steps_done_ >= target ||
                            since_poll >= kHostPollEvery;
         if (!event) continue;
@@ -2232,6 +2280,10 @@ bool Sim3D::run() {
             if (!append_boundary()) return false;
             advance_schedule(&next_boundary, boundary_every);
         }
+        if (surface_output_ && steps_done_ >= next_surface) {
+            if (!append_surface()) return false;
+            advance_schedule(&next_surface, surface_every);
+        }
         if (!options_.checkpoint_dir.empty() && steps_done_ >= next_checkpoint) {
             const std::filesystem::path rolling =
                 std::filesystem::path(options_.checkpoint_dir) / "checkpoint.pf3d";
@@ -2262,6 +2314,10 @@ bool Sim3D::run() {
     if (boundary_output_) {
         if (last_boundary_step_ != steps_done_ && !append_boundary()) return false;
         if (!boundary_output_->close()) return false;
+    }
+    if (surface_output_) {
+        if (last_surface_step_ != steps_done_ && !append_surface()) return false;
+        if (!surface_output_->close()) return false;
     }
     if (terminate_requested)
         std::printf("[3d] termination requested; stopped at accepted step %llu\n",

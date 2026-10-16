@@ -2,6 +2,7 @@
 
 #include "checkpoint.cuh"
 #include "boundary_output.cuh"
+#include "surface_output.cuh"
 #include "initializer.hpp"
 #include "kernels.cuh"
 #include "palmieri_initializer.hpp"
@@ -77,6 +78,9 @@ struct RunOptions3D {
     long long boundary_interval = 0;
     boundary::Projection boundary_projection = boundary::Projection::Maximum;
     bool boundary_compress = false;
+    std::string surface_path;
+    long long surface_interval = 0;
+    bool surface_compress = false;
 };
 
 class Sim3D {
@@ -145,6 +149,8 @@ private:
     void close_trajectory();
     bool checkpoint_at_current_state(const std::string& path);
     bool append_boundary();
+    bool append_surface();
+    SurfaceDeviceView3D surface_view() const;
     const float* current_phi() const;
     float* current_phi();
     std::uint32_t* current_S();
@@ -154,6 +160,8 @@ private:
     RunOptions3D options_{};
     std::unique_ptr<BoundaryOutput3D> boundary_output_;
     std::uint64_t last_boundary_step_ = 0;
+    std::unique_ptr<SurfaceOutput3D> surface_output_;
+    std::uint64_t last_surface_step_ = 0;
     StorageMode3D selected_mode_ = StorageMode3D::Auto;
     SLayout3D layout_{};
     CellFieldStorage3D field_storage_{};
@@ -198,6 +206,7 @@ private:
     // healthy polls. It is idempotent until the next distributed step.
     std::function<bool()> distributed_step_;
     std::function<bool()> gather_state_;
+    std::function<bool(SurfaceOutput3D&)> capture_surfaces_;
 
     float* d_phi_[2] = {nullptr, nullptr};
     float** d_promoted_phi_[2] = {nullptr, nullptr};

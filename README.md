@@ -156,6 +156,8 @@ disabled, and neither recorder changes the model or checkpoint schema.
 - CMake 3.24 or newer and a C++17 compiler;
 - Python 3.10 or newer for the tests and command-line tools. The optional
   pinned visualization environment requires Python 3.11 or newer.
+- NumPy for 3D interface reconstruction and its contract tests; the optional
+  Python `zstandard` package for reading compressed interface files.
 
 The optimized default targets CUDA compute capability 9.0 (`sm_90`).
 The measured GH200 configurations below identify their tested compiler and
@@ -793,6 +795,21 @@ for analysis. Projected boundaries are input for neighbor-exchange analysis,
 not automatically a 3D contact graph or a T1-event classification.
 See [the format and usage guide](docs/boundary-output-3d.md) for projection
 semantics, optional lossless zstd compression, and tests.
+
+### Three-dimensional interfaces
+
+`--surface-out surfaces.pfs3d --surface-interval 10000` saves the original
+float32 samples needed to reconstruct every cell's `phi=0.5` crossing cubes,
+including in multilayer channels. It is not a top-down projection. Add
+`--surface-compression zstd` when built with libzstd, and use a new file for
+each continuation segment. Persistent IDs, unwrapped origins, wall geometry,
+polarity and tumble counts are retained. Output does not alter the simulation.
+
+Packing is performed on the owning GPU, with bounded buffers; recording alone
+does not gather whole phase fields between devices. See
+[recording, reconstruction, caps, and tests](docs/surface_output_3d.md).
+These observations enable later geometric contact analysis; a validated 3D
+exchange detector is not part of this recorder.
 
 ### Rendering a substrate checkpoint
 

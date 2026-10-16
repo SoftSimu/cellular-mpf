@@ -25,6 +25,7 @@ checkpoint*.bin
 *.pf3d
 *.pfb
 *.pfb3d
+*.pfs3d
 example-output/
 example-3d-output/
 initial_centres*.csv

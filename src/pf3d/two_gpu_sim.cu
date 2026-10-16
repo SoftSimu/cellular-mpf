@@ -47,6 +47,7 @@ TwoGpuSim3D::~TwoGpuSim3D() {
         if (!sim_[r]) continue;
         sim_[r]->distributed_step_ = {};
         sim_[r]->gather_state_ = {};
+        sim_[r]->capture_surfaces_ = {};
         if (!select(r)) continue;
         checked(cudaStreamSynchronize(sim_[r]->stream_), "drain owned work");
         if (exchange_streams_[r])
@@ -181,6 +182,9 @@ bool TwoGpuSim3D::clone_peer() {
     options.boundary_interval = 0;
     options.boundary_compress = false;
     options.boundary_projection = boundary::Projection::Maximum;
+    options.surface_path.clear();
+    options.surface_interval = 0;
+    options.surface_compress = false;
     options.checkpoint_dir.clear();
     options.final_checkpoint = false;
     options.measure_shards = primary.measurement_shards_;
@@ -332,6 +336,9 @@ bool TwoGpuSim3D::initialize() {
          sizeof(flags_), cudaMemcpyDeviceToHost), "read initial integrity flags")) return false;
     primary.distributed_step_ = [this] { return distributed_step(); };
     primary.gather_state_ = [this] { return gather_state(); };
+    primary.capture_surfaces_ = [this](SurfaceOutput3D& output) {
+        return capture_surfaces(output);
+    };
     std::printf("[two-gpu] devices %d,%d; y-partitioned whole cells; "
                 "replicated storage; base measurement shards %d\n",
                 primary.options_.device, peer_device_, primary.measurement_shards_);
@@ -624,6 +631,18 @@ bool TwoGpuSim3D::distributed_step() {
     for (std::size_t id = 0; id < canonical_.size(); ++id)
         canonical_[id] = downloads_[owners_[id]].cells[id];
     return enqueue_state_broadcast() && configure_ownership(false) && select(0);
+}
+
+bool TwoGpuSim3D::capture_surfaces(SurfaceOutput3D& output) {
+    // Pack on each owner. No phase-field peer transfer or aggregate rebuild is
+    // needed merely to observe interfaces.
+    if (!wait_all()) return false;
+    // Another observer may already have gathered all fields and cleared the
+    // primary selection. Reuse that complete view instead of counting it twice.
+    if (primary_canonical_)
+        return output.capture({sim_[0]->surface_view()}, sim_[0]->step(), sim_[0]->time());
+    return output.capture({sim_[0]->surface_view(), sim_[1]->surface_view()},
+                          sim_[0]->step(), sim_[0]->time());
 }
 
 bool TwoGpuSim3D::run() { return select(0) && sim_[0]->run(); }

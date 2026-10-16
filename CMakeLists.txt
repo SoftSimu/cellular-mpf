@@ -118,7 +118,8 @@ set_target_properties(cell_gh200 PROPERTIES
 pf_enable_warnings(cell_gh200)
 
 if(PF_BUILD_3D)
-  add_library(pf3d_boundary STATIC src/pf3d/boundary_output.cu)
+  add_library(pf3d_boundary STATIC
+    src/pf3d/boundary_output.cu src/pf3d/surface_output.cu)
   target_include_directories(pf3d_boundary PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/common)
   target_compile_options(pf3d_boundary PRIVATE
@@ -419,6 +420,29 @@ if(BUILD_TESTING)
         ${PF_HOST_NO_CONTRACTION})
     endif()
     add_test(NAME pf3d_one_step_cpu COMMAND pf3d_one_step_cpu_test)
+    add_test(NAME pf3d_surface_contract
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/surface_contract_test.py)
+    foreach(surface_case IN ITEMS missing zero_interval bad_codec bench)
+      if(surface_case STREQUAL "missing")
+        set(surface_args --surface-out test.pfs3d)
+        set(surface_diagnostic "[3d] surface output requires --surface-out and --surface-interval")
+      elseif(surface_case STREQUAL "zero_interval")
+        set(surface_args --surface-out test.pfs3d --surface-interval 0)
+        set(surface_diagnostic "[3d] --surface-interval expects an integer in [1, 1000000000000], got '0'")
+      elseif(surface_case STREQUAL "bad_codec")
+        set(surface_args --surface-compression invalid)
+        set(surface_diagnostic "[3d] --surface-compression expects none or zstd")
+      else()
+        set(surface_args --surface-out test.pfs3d --surface-interval 10 --bench 10)
+        set(surface_diagnostic "[3d] surface output cannot be combined with --bench")
+      endif()
+      add_test(NAME pf3d_surface_cli_${surface_case}
+        COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:cell_gh200_3d>
+          "-DCASE_ARGS=${surface_args}" -DEXPECT_CODE=2
+          "-DEXPECT_LINE=${surface_diagnostic}"
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/run_cli_case.cmake)
+    endforeach()
 
     add_executable(pf3d_measure_shards_cpu_test
       tests/3d/measure_shards_cpu_test.cpp)
@@ -488,6 +512,17 @@ if(BUILD_TESTING)
     add_test(NAME pf3d_brick_classes_cpu COMMAND pf3d_brick_classes_cpu_test)
 
     if(PF_ENABLE_GPU_TESTS)
+      add_executable(pf3d_surface_gpu_test tests/3d/surface_gpu_test.cu)
+      target_link_libraries(pf3d_surface_gpu_test PRIVATE pf3d_boundary)
+      target_compile_options(pf3d_surface_gpu_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:${PF_CUDA_FLAGS}>)
+      set_target_properties(pf3d_surface_gpu_test PROPERTIES CUDA_RUNTIME_LIBRARY ${PF_CUDA_RUNTIME})
+      pf_enable_warnings(pf3d_surface_gpu_test)
+      add_test(NAME pf3d_surface_gpu
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/run_surface_smoke.py
+          --executable $<TARGET_FILE:pf3d_surface_gpu_test>)
+      set_tests_properties(pf3d_surface_gpu PROPERTIES SKIP_RETURN_CODE 77)
       add_executable(pf3d_halo_pipeline_test tests/3d/halo_pipeline_gpu_test.cu)
       target_link_libraries(pf3d_halo_pipeline_test PRIVATE pf_shape_config)
       target_include_directories(pf3d_halo_pipeline_test PRIVATE

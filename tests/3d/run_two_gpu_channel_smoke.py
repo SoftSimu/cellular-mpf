@@ -111,7 +111,7 @@ def boundary_frames(path: Path) -> dict[int, tuple]:
 
 def run(binary: Path, directory: Path, end: int, centres: Path, *,
         resume: Path | None = None, strict: bool = False, two_gpu: bool = False,
-        memory_mode: str = "throughput") -> Path:
+        memory_mode: str = "throughput", extra_args: tuple[str, ...] = ()) -> Path:
     if memory_mode not in ("throughput", "balanced", "compact"):
         raise ValueError(f"unsupported smoke-test memory mode: {memory_mode}")
     if two_gpu and memory_mode != "throughput":
@@ -138,6 +138,7 @@ def run(binary: Path, directory: Path, end: int, centres: Path, *,
     ]
     if strict:
         arguments.append("--strict")
+    arguments.extend(extra_args)
     log_path = directory / "run.log"
     with log_path.open("x", encoding="utf-8") as log:
         completed = subprocess.run([str(binary), *arguments], cwd=directory,

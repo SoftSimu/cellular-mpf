@@ -110,6 +110,12 @@ void usage(const char* program) {
         "                            substrate z=0 footprint       (maximum)\n"
         "  --boundary-compression <none|zstd> optional zstd build     (none)\n"
         "\n"
+        "three-dimensional interfaces (off by default)\n"
+        "  --surface-out <path>      new lossless phi=0.5 sample stream\n"
+        "  --surface-interval <n>    cadence in accepted steps; required\n"
+        "  --surface-compression <none|zstd> optional zstd build      (none)\n"
+        "                            new segment file on every restart\n"
+        "\n"
         "checkpointing (current PF3D format)\n"
         "  -c, --checkpoint <path>   resume the complete stored state\n"
         "  --checkpoint-interval <n> rolling checkpoint cadence in steps\n"
@@ -247,6 +253,7 @@ struct ParsedCommand {
     bool trajectory_samples_supplied = false;
     bool trajectory_interval_supplied = false;
     bool boundary_options_supplied = false;
+    bool surface_options_supplied = false;
     bool slab_height_supplied = false;
     int slab_height = 0;
     bool channel_height_supplied = false;
@@ -621,6 +628,29 @@ OptionStatus parse_boundary_option(int argc, char** argv, int* index,
     return OptionStatus::Accepted;
 }
 
+OptionStatus parse_surface_option(int argc, char** argv, int* index,
+                                  const char* argument, ParsedCommand* command) {
+    if (std::strcmp(argument, "--surface-out") != 0 &&
+        std::strcmp(argument, "--surface-interval") != 0 &&
+        std::strcmp(argument, "--surface-compression") != 0)
+        return OptionStatus::Unrecognized;
+    command->surface_options_supplied = true;
+    const char* value = value_after(argc, argv, index, argument);
+    if (!value) return OptionStatus::Error;
+    auto& options = command->options;
+    if (std::strcmp(argument, "--surface-out") == 0) options.surface_path = value;
+    else if (std::strcmp(argument, "--surface-interval") == 0) {
+        if (!parse_integer(argument, value, 1, 1000000000000LL, &options.surface_interval))
+            return OptionStatus::Error;
+    } else if (std::strcmp(value, "none") == 0) options.surface_compress = false;
+    else if (std::strcmp(value, "zstd") == 0) options.surface_compress = true;
+    else {
+        std::fprintf(stderr, "[3d] --surface-compression expects none or zstd\n");
+        return OptionStatus::Error;
+    }
+    return OptionStatus::Accepted;
+}
+
 OptionStatus parse_checkpoint_option(int argc, char** argv, int* index,
                                      const char* argument,
                                      ParsedCommand* command) {
@@ -672,6 +702,7 @@ CommandStatus parse_command_line(int argc, char** argv,
         parse_execution_option,
         parse_trajectory_option,
         parse_boundary_option,
+        parse_surface_option,
         parse_checkpoint_option,
     };
 
@@ -707,6 +738,15 @@ CommandStatus parse_command_line(int argc, char** argv,
     }
     if (command->boundary_options_supplied && command->options.bench_steps > 0) {
         std::fprintf(stderr, "[3d] boundary output cannot be combined with --bench\n");
+        return CommandStatus::UsageError;
+    }
+    if (command->surface_options_supplied &&
+        (command->options.surface_path.empty() || command->options.surface_interval <= 0)) {
+        std::fprintf(stderr, "[3d] surface output requires --surface-out and --surface-interval\n");
+        return CommandStatus::UsageError;
+    }
+    if (command->surface_options_supplied && command->options.bench_steps > 0) {
+        std::fprintf(stderr, "[3d] surface output cannot be combined with --bench\n");
         return CommandStatus::UsageError;
     }
     return CommandStatus::Ready;
