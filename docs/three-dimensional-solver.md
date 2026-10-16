@@ -33,6 +33,12 @@ face, edge, corner, and center weights `14`, `3`, `1`, and `-128`, divided by
 and a cell's own contribution is subtracted as the same integer used in the
 sum.
 
+The evolved phase field is not clipped to `[0,1]`. As in the 2D solver, the
+integer conversion limits an individual squared contribution to `4`; exceeding
+that bound raises a fatal flag, so a step using the limited contribution is
+not accepted. Aggregate overflow and negative self-subtraction are also fatal.
+These checks are distinct from the optional support-edge diagnostic.
+
 At every active step, a Bernoulli tumble with probability
 `-expm1(-dt/tau)` reproduces exponential survival at the timestep resolution.
 For periodic XYZ, a new direction is uniform on the unit sphere: `z=2u-1` and

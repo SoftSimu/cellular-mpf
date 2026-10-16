@@ -18,6 +18,43 @@ constexpr int kWarps3D = kThreads3D / 32;
 
 using Reduction3D = MomentPartial3D;
 
+// Retain every overflow check but consume an atomic's return at the next
+// scatter, after independent stencil work. Flush before leaving the tile.
+struct PendingScatter3D {
+    std::uint32_t old = 0u;
+    std::uint32_t limit = 0xffffffffu;
+
+    __device__ __forceinline__ void finish(CellState3D* cell,
+        std::uint32_t* global_flags) {
+        if (old > limit)
+            raise_flag(cell, global_flags, FLAG3D_S_OVERFLOW);
+        old = 0u;
+        limit = 0xffffffffu;
+    }
+
+    __device__ __forceinline__ void add(std::uint32_t* aggregate,
+        std::size_t index, float phi, CellState3D* cell,
+        std::uint32_t* global_flags) {
+        if (phi * phi > kQClampPhiSq)
+            raise_flag(cell, global_flags, FLAG3D_Q_CLAMP);
+        const std::uint32_t value = q_of(phi);
+        if (value == 0u) return;
+        finish(cell, global_flags);
+        limit = 0xffffffffu - value;
+        old = atomicAdd(&aggregate[index], value);
+    }
+};
+
+// Keep the read ahead of the current voxel's independent stencil work. The
+// aggregate is immutable during this kernel; the loaded integer is unchanged.
+__device__ __forceinline__ std::uint32_t load_aggregate_ahead(
+    const std::uint32_t* address) {
+    std::uint32_t value;
+    asm volatile("ld.global.u32 %0, [%1];"
+                 : "=r"(value) : "l"(address) : "memory");
+    return value;
+}
+
 constexpr bool recognized_boundary(const SLayout3D& layout) {
     return layout.periodic_xyz() || layout.substrate_slab() ||
            layout.hard_wall_channel();
@@ -930,8 +967,10 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             const int y0 = ty * kBrickY;
             const int z0 = tz * kBrickZ;
 
+            [[maybe_unused]] PendingScatter3D pending_scatter;
             const auto update_voxel = [&](int ix, int iy, int iz,
-                                          StencilValues3D values) {
+                                          StencilValues3D values,
+                                          std::uint32_t prefetched = 0u) {
                 const int x = x0 + ix, y = y0 + iy, z = z0 + iz;
                 if (x >= B || y >= B || z >= B) return;
                 int wz = 0;
@@ -957,6 +996,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 const int wx = wrap_offset(origin_x, x, args.layout.nx);
                 const int wy = wrap_offset(origin_y, y, args.layout.ny);
                 const std::uint32_t aggregate =
+                    !CollectMoments ? prefetched :
                     args.S_in[s_index(args.layout, wx, wy, wz)];
                 float other = other_field(aggregate, centre, state,
                                           args.global_flags);
@@ -997,9 +1037,14 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 if (args.S_out != nullptr) {
                     // Integer Q5.27 additions are exact and order-independent;
                     // sharding changes only which CTA issues each atomic.
-                    scatter_value(args.S_out,
-                                  s_index(args.layout, wx, wy, wz), next,
-                                  state, args.global_flags);
+                    if constexpr (!CollectMoments)
+                        pending_scatter.add(args.S_out,
+                            s_index(args.layout, wx, wy, wz), next,
+                            state, args.global_flags);
+                    else
+                        scatter_value(args.S_out,
+                                      s_index(args.layout, wx, wy, wz), next,
+                                      state, args.global_flags);
                 }
 
                 if constexpr (CollectMoments) {
@@ -1035,14 +1080,37 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 const int ix = static_cast<int>(threadIdx.x) % kBrickX;
                 for (int iy = static_cast<int>(threadIdx.x) / kBrickX;
                      iy < kBrickY; iy += kThreads3D / kBrickX) {
+                    const int x = x0 + ix, y = y0 + iy;
+                    const std::size_t row = s_index(args.layout,
+                        wrap_offset(origin_x, x, args.layout.nx),
+                        wrap_offset(origin_y, y, args.layout.ny), 0);
+                    const std::size_t plane_words =
+                        static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
+                    const auto prefetch = [&](int iz) {
+                        int wz = 0;
+                        const int z = z0 + iz;
+                        const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
+                            : aggregate_z(args.layout, origin_z, z, &wz);
+                        return x < B && y < B && z < B && mapped
+                            ? load_aggregate_ahead(args.S_in + row
+                                + static_cast<std::size_t>(wz) * plane_words)
+                            : 0u;
+                    };
+                    std::uint32_t current_aggregate = prefetch(0);
+                    std::uint32_t queued_aggregate = prefetch(1);
                     float p0[9], p1[9];
                     load_stencil_plane(shared_phi, ix, iy, 0, p0);
                     load_stencil_plane(shared_phi, ix, iy, 1, p1);
                     const auto advance = [&](float* below,
                                               const float* middle, int iz) {
+                        constexpr int distance = 2;
+                        const std::uint32_t next_aggregate = iz + distance < kBrickZ
+                            ? prefetch(iz + distance) : 0u;
                         const auto values = advance_stencil_plane(
                             shared_phi, ix, iy, iz, below, middle);
-                        update_voxel(ix, iy, iz, values);
+                        update_voxel(ix, iy, iz, values, current_aggregate);
+                        current_aggregate = queued_aggregate;
+                        queued_aggregate = next_aggregate;
                     };
                     for (int iz = 0; iz < kBrickZ; iz += 2) {
                         advance(p0, p1, iz);
@@ -1050,6 +1118,8 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     }
                 }
             }
+            if constexpr (!CollectMoments)
+                pending_scatter.finish(state, args.global_flags);
             __syncthreads();
             parity = 1 - parity;
         }
@@ -1501,8 +1571,29 @@ void k_measure_promoted_shards_impl(MeasureArgs3D args,
             const int x0 = bx * kBrickX;
             const int y0 = by * kBrickY;
             const int z0 = bz * kBrickZ;
+            const auto prefetch = [&](int q) {
+                if (q >= kBrickVoxels) return 0u;
+                const int x = x0 + q % kBrickX;
+                const int y = y0 + (q / kBrickX) % kBrickY;
+                const int z = z0 + q / (kBrickX * kBrickY);
+                int wz = 0;
+                const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
+                    : aggregate_z(args.layout, origin_z, z, &wz);
+                return x < B && y < B && z < B && mapped
+                    ? load_aggregate_ahead(args.S + s_index(args.layout,
+                        wrap_offset(ox, x, args.layout.nx),
+                        wrap_offset(oy, y, args.layout.ny), wz))
+                    : 0u;
+            };
+            std::uint32_t current_aggregate = prefetch(threadIdx.x);
+            std::uint32_t queued_aggregate = prefetch(threadIdx.x + kThreads3D);
             for (int q = static_cast<int>(threadIdx.x); q < kBrickVoxels;
                  q += kThreads3D) {
+                const std::uint32_t next_aggregate = prefetch(
+                    q + 2 * kThreads3D);
+                const std::uint32_t prefetched = current_aggregate;
+                current_aggregate = queued_aggregate;
+                queued_aggregate = next_aggregate;
                 const int ix = q % kBrickX;
                 const int iy = (q / kBrickX) % kBrickY;
                 const int iz = q / (kBrickX * kBrickY);
@@ -1522,11 +1613,8 @@ void k_measure_promoted_shards_impl(MeasureArgs3D args,
                 float gx, gy, gz;
                 gradient3(shared_phi, ix + 1, iy + 1, iz + 1,
                           &gx, &gy, &gz);
-                const int wx = wrap_offset(ox, x, args.layout.nx);
-                const int wy = wrap_offset(oy, y, args.layout.ny);
                 float other = centre != 0.0f
-                    ? other_field(args.S[s_index(args.layout, wx, wy, wz)],
-                                  centre, state, args.global_flags)
+                    ? other_field(prefetched, centre, state, args.global_flags)
                     : 0.0f;
                 if constexpr (WallCoupling)
                     other += weighted_wall_field<true>(
@@ -1654,8 +1742,29 @@ void k_measure_cell_shards_impl(MeasureArgs3D args) {
             const int x0 = bx * kBrickX;
             const int y0 = by * kBrickY;
             const int z0 = bz * kBrickZ;
+            const auto prefetch = [&](int q) {
+                if (q >= kBrickVoxels) return 0u;
+                const int x = x0 + q % kBrickX;
+                const int y = y0 + (q / kBrickX) % kBrickY;
+                const int z = z0 + q / (kBrickX * kBrickY);
+                int wz = 0;
+                const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
+                    : aggregate_z(args.layout, origin_z, z, &wz);
+                return x < B && y < B && z < B && mapped
+                    ? load_aggregate_ahead(args.S + s_index(args.layout,
+                        wrap_offset(ox, x, args.layout.nx),
+                        wrap_offset(oy, y, args.layout.ny), wz))
+                    : 0u;
+            };
+            std::uint32_t current_aggregate = prefetch(threadIdx.x);
+            std::uint32_t queued_aggregate = prefetch(threadIdx.x + kThreads3D);
             for (int q = static_cast<int>(threadIdx.x); q < kBrickVoxels;
                  q += kThreads3D) {
+                const std::uint32_t next_aggregate = prefetch(
+                    q + 2 * kThreads3D);
+                const std::uint32_t prefetched = current_aggregate;
+                current_aggregate = queued_aggregate;
+                queued_aggregate = next_aggregate;
                 const int ix = q % kBrickX;
                 const int iy = (q / kBrickX) % kBrickY;
                 const int iz = q / (kBrickX * kBrickY);
@@ -1675,11 +1784,8 @@ void k_measure_cell_shards_impl(MeasureArgs3D args) {
                 float gx, gy, gz;
                 gradient3(shared_phi, ix + 1, iy + 1, iz + 1,
                           &gx, &gy, &gz);
-                const int wx = wrap_offset(ox, x, args.layout.nx);
-                const int wy = wrap_offset(oy, y, args.layout.ny);
                 float other = centre != 0.0f
-                    ? other_field(args.S[s_index(args.layout, wx, wy, wz)],
-                                  centre, state, args.global_flags)
+                    ? other_field(prefetched, centre, state, args.global_flags)
                     : 0.0f;
                 if constexpr (WallCoupling)
                     other += weighted_wall_field<true>(
