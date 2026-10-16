@@ -6,7 +6,9 @@ needed to reconstruct each cell's three-dimensional 0.5 interface.
 
 This is optional, read-only output. It changes neither the equations nor the
 timestep, field precision, polarity, random draws, or checkpoint format. It does
-not implement a contact graph or identify rearrangements.
+not itself implement a contact graph or identify rearrangements. The separate
+[contact/exchange tools](contact_exchange_3d.md) measure geometric proximity and
+persistent graph changes, with explicit limits on topological interpretation.
 
 ## Recording
 
@@ -137,7 +139,7 @@ Use bounded run segments and archive completed segments; do not rely on scratch
 to retain a whole campaign.
 
 A 3D neighbour exchange is not automatically the four-cell T1 event of a planar
-tiling. Subsequent analysis needs a validated three-dimensional proximity/contact
+tiling. Scientific interpretation needs a calibrated three-dimensional proximity/contact
 definition, periodic-image handling, exclusion of wall caps, persistence or
 hysteresis, and a temporal-resolution check. Diffuse cells may have separated
 0.5 surfaces even when they interact. Occasional full checkpoints can calibrate

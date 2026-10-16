@@ -808,8 +808,9 @@ polarity and tumble counts are retained. Output does not alter the simulation.
 Packing is performed on the owning GPU, with bounded buffers; recording alone
 does not gather whole phase fields between devices. See
 [recording, reconstruction, caps, and tests](docs/surface_output_3d.md).
-These observations enable later geometric contact analysis; a validated 3D
-exchange detector is not part of this recorder.
+The separate [contact/exchange analysis](docs/contact_exchange_3d.md) measures
+surface-proximity areas and persistent graph changes without CUDA. It reports
+exchange candidates, not automatically confirmed three-dimensional T events.
 
 ### Rendering a substrate checkpoint
 
@@ -935,7 +936,8 @@ it.
 Citation metadata is provided in [`CITATION.cff`](CITATION.cff). Publication
 venue and DOI are intentionally omitted until they exist.
 
-No third-party source is vendored. CUDA, CMake, Python, and optional zstd remain under
-their respective licenses. The counter-based generator implements the
+No third-party source is vendored. CUDA, CMake, Python, optional zstd, and the
+optional Python analysis packages remain under their respective licenses.
+The counter-based generator implements the
 Philox4x32-10 algorithm described by Salmon *et al.*, “Parallel random numbers:
 as easy as 1, 2, 3,” SC '11, [doi:10.1145/2063384.2063405](https://doi.org/10.1145/2063384.2063405).

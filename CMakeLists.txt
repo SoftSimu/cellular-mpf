@@ -36,6 +36,8 @@ option(PF_BUILD_3D "Build the separate three-dimensional simulator" ON)
 option(PF_ENABLE_CHECKPOINT_IO_TESTS
   "Register checkpoint I/O tests that stage through any CUDA device without launching kernels" OFF)
 option(PF_ENABLE_GPU_TESTS "Register the public CUDA smoke tests" OFF)
+option(PF_ENABLE_CONTACT_TESTS
+       "Register offline 3D contact tests (requires SciPy and scikit-image)" OFF)
 # Standalone two-GPU communication probe; it is not part of the simulator.
 option(PF_BUILD_PEER_PROBE
        "Build the optional two-GPU CUDA peer bandwidth probe" OFF)
@@ -423,6 +425,20 @@ if(BUILD_TESTING)
     add_test(NAME pf3d_surface_contract
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/surface_contract_test.py)
+    if(PF_ENABLE_CONTACT_TESTS)
+      execute_process(COMMAND ${Python3_EXECUTABLE} -c
+        "import numpy, scipy, skimage"
+        RESULT_VARIABLE PF_CONTACT_IMPORT_STATUS)
+      if(NOT PF_CONTACT_IMPORT_STATUS EQUAL 0)
+        message(FATAL_ERROR
+          "PF_ENABLE_CONTACT_TESTS needs tools/requirements-contacts.txt")
+      endif()
+      foreach(contact_test IN ITEMS geometry exchange cli)
+        add_test(NAME pf3d_contact_${contact_test}
+          COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/contact_${contact_test}_test.py)
+      endforeach()
+    endif()
     foreach(surface_case IN ITEMS missing zero_interval bad_codec bench)
       if(surface_case STREQUAL "missing")
         set(surface_args --surface-out test.pfs3d)

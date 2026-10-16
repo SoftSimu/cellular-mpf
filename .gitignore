@@ -26,6 +26,8 @@ checkpoint*.bin
 *.pfb
 *.pfb3d
 *.pfs3d
+/contacts*.jsonl
+/changes*.jsonl
 example-output/
 example-3d-output/
 initial_centres*.csv
@@ -37,6 +39,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv-viz/
+.venv-contacts/
 .coverage
 .idea/
 .vscode/
