@@ -52,7 +52,13 @@ def export(args):
                     raise SurfaceFormatError('surface legs have different physical/geometry contracts')
                 contract = current
                 last_frame = None
+                stream_first = None
+                flagged_frames = []
                 for frame in reader:
+                    stream_first = frame.step if stream_first is None else stream_first
+                    flagged = [dict(id=c.id, flags=c.flags) for c in frame.cells if c.flags]
+                    if flagged:
+                        flagged_frames.append(dict(step=frame.step, cells=flagged))
                     ids = tuple(sorted(cell.id for cell in frame.cells))
                     if identity is not None and ids != identity:
                         raise SurfaceFormatError('persistent cell IDs change between surface legs')
@@ -115,7 +121,9 @@ def export(args):
                         source=str(path), cells=sorted(entries, key=lambda item: item['id'])))
                 if not reader.complete:
                     raise SurfaceFormatError('surface stream did not finish cleanly')
-                manifest['streams'].append(dict(path=str(path), complete=True, frames=reader.frame_count))
+                manifest['streams'].append(dict(path=str(path), complete=True, frames=reader.frame_count,
+                    cells_per_frame=reader.header.cells, first_step=stream_first,
+                    last_step=None if last_frame is None else last_frame.step, flagged_frames=flagged_frames))
                 if last_frame is not None:
                     last_digest = frame_digest(last_frame)
         found = {frame['step'] for frame in manifest['frames']}

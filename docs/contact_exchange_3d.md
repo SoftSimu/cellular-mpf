@@ -76,8 +76,10 @@ Only **computational zero-extension caps** are removed. The real phase field in
 steric-wall padding is retained, not cut at the nominal slit plane. Per-cell
 diagnostics bound how much surface area lies outside the nominal walls.
 
-An interface truncated by its local support, empty at 0.5, or close to a periodic
-self-image is unobservable and censored. Disconnected, nonmanifold, or unexpectedly
+An interface with recorded fatal/unknown integrity flags, truncated by its local
+support, empty at 0.5, or close to a periodic self-image is unobservable and
+censored. The nonfatal support-sizing hint alone is not a loss of observability.
+Disconnected, nonmanifold, or unexpectedly
 open interfaces are reported; `track` censors them when interpreting graph changes.
 An open surface at a known computational cap is allowed. Persistent cell IDs—not height,
 colour, or output order—determine identity.

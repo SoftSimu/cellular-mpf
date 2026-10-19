@@ -125,6 +125,10 @@ def _check_support(dense, cell, header):
 
 
 def mesh_from_surface(cell: Cell, header: Header, *, max_voxels=32_000_000):
+    # Version-1 CellState flags: bit 6 is a support-sizing hint, not lost data.
+    # Other (including unknown) flags must not produce geometric events.
+    if cell.flags & ~(1 << 6):
+        raise UnobservableInterface(f'cell {cell.id}: recorded integrity flags {cell.flags:#x}')
     dense = dense_interface_field(cell, max_voxels=max_voxels)
     _check_support(dense, cell, header)
     ties = int(np.count_nonzero(dense == np.float32(0.5)))

@@ -196,6 +196,17 @@ class ContactCLI(unittest.TestCase):
         self.assertEqual(rows[-1]['status'], 'bounded_prefix')
         self.assertEqual(rows[-1]['streams'][0]['read_frames'], 1)
 
+    def test_recorded_integrity_failure_is_censored_not_a_contact_loss(self):
+        bad = replace(self.near, flags=1 << 3)
+        path = self.write_stream('flagged.pfs3d', [(0,(self.a,self.near)),
+            (10,(self.a,bad)), (20,(self.a,self.far)), (30,(self.a,self.far))])
+        table = self.measure(path)
+        self.assertFalse(self.records(table)[2]['cells'][1]['observable'])
+        self.assertEqual(self.records(self.track(table))[-1]['counts']['contact_lost'], 0)
+        hint = replace(self.near, flags=1 << 6)
+        path = self.write_stream('hint.pfs3d', [(0,(self.a,hint))])
+        self.assertTrue(self.records(self.measure(path,name='hint.jsonl'))[1]['cells'][1]['observable'])
+
 
 if __name__ == '__main__':
     unittest.main()

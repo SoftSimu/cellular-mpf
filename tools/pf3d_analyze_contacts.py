@@ -67,7 +67,7 @@ def measure_frame(frame, header, args):
     meshes, diagnostics = [], []
     for cell in sorted(frame.cells, key=lambda item: item.id):
         metadata = dict(id=cell.id, gamma=cell.gamma, radius=cell.radius,
-                        active_speed=cell.active_speed)
+                        active_speed=cell.active_speed, recorder_flags=cell.flags)
         try:
             mesh = mesh_from_surface(cell, header, max_voxels=args.max_cell_voxels)
             if not len(mesh.faces):
