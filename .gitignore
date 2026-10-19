@@ -26,8 +26,11 @@ checkpoint*.bin
 *.pfb
 *.pfb3d
 *.pfs3d
+*.ply
 /contacts*.jsonl
 /changes*.jsonl
+/events/
+/candidate_meshes/
 example-output/
 example-3d-output/
 initial_centres*.csv
