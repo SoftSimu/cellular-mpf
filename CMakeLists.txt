@@ -433,7 +433,7 @@ if(BUILD_TESTING)
         message(FATAL_ERROR
           "PF_ENABLE_CONTACT_TESTS needs tools/requirements-contacts.txt")
       endif()
-      foreach(contact_test IN ITEMS geometry exchange cli)
+      foreach(contact_test IN ITEMS geometry exchange cli catalog export)
         add_test(NAME pf3d_contact_${contact_test}
           COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/contact_${contact_test}_test.py)

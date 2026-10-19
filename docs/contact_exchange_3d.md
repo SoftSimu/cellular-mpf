@@ -14,10 +14,11 @@ NumPy 2.5.4, SciPy 1.17.1 and scikit-image 0.26.0; no CUDA device is needed.
 ```sh
 python -m pip install -r tools/requirements-contacts.txt
 python tools/pf3d_analyze_contacts.py measure leg_001.pfs3d leg_002.pfs3d \
-  --gap 2 --output contacts.jsonl
+  --gap 2 --workers 4 --output contacts.jsonl
 python tools/pf3d_analyze_contacts.py track contacts.jsonl \
   --area-on 10 --area-off 5 --persistence-steps 20000 \
   --max-frame-gap 10000 --exchange-window 20000 --output changes.jsonl
+python tools/pf3d_analyze_contacts.py catalog changes.jsonl --output-dir events
 ```
 
 **These numbers illustrate syntax, not calibrated scientific thresholds.** Gap
@@ -41,6 +42,15 @@ snapshot but labels the output `bounded_prefix`: unread stream completion is not
 certified. `--recover` accepts a truncated tail, never checksum corruption, and
 labels the result `recovered_prefix`. A failure record or absent summary makes a
 table unusable by `track`.
+
+`--workers` parallelizes independent frames on CPUs without changing their
+geometry or output order. The pending queue is bounded by the worker count;
+memory therefore grows with that count, including each worker's meshes and
+distance indices. Start with a small number and reserve sufficient CPU memory.
+For larger populations explicitly raise `--max-frame-mib`, for example to 2048.
+Set `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1` when using several workers to avoid
+oversubscribing the allocation. Geometry is computed once; subsequent threshold,
+persistence and cadence scans use the contact table and need no GPU or meshes.
 
 ## Definition and geometry
 
@@ -120,6 +130,46 @@ Two deliberately limited annotations accompany the measured changes:
   establish a shared tricellular line, contact-face geometry or junction collapse.
   Supporting triples and ambiguity are retained; no confirmed 3D topological
   event count is emitted.
+
+## Final tables and geometric inspection
+
+`catalog` reads a completed tracking table, checks its counts and event references,
+and reconciles the entire observed history. Both the old and new assignments
+become ambiguous if a later candidate competes for the same change. Overlapping
+candidate intervals sharing a cell are also marked; using the same cell at
+separate times is not itself an ambiguity. It writes:
+
+- `contact_changes.csv`: persistent gains/losses, stable cell IDs, observed
+  crossing intervals and confirmation times;
+- `exchange_candidates.csv`: four-cell candidates and conflicting assignments;
+- `bulk_candidates.csv`: ET/TE-compatible graph annotations;
+- `catalog.json`: source hash, settings, reconciled counts and censored endpoints.
+
+These are operational geometric measurements, not confirmed junction-collapse
+counts. All times use the absolute simulation clock in units of tau, including
+any preparation. A `recovered_prefix` or `bounded_prefix` input needs explicit
+`--allow-prefix` and retains that label. Existing output directories are refused.
+
+Inspect candidate cells directly from the recorded interfaces, independently of
+the simulator. For example, replace the illustrative IDs/steps below with entries
+from the event table:
+
+```sh
+python tools/pf3d_export_surfaces.py leg_001.pfs3d leg_002.pfs3d \
+  --steps 100000 110000 120000 --ids 7 11 23 31 --anchor-id 7 \
+  --max-frame-mib 2048 --output-dir candidate_meshes
+```
+
+The binary PLY files open in VTK/ParaView or other mesh viewers. Each file contains
+one whole cell, with binary64 coordinates and triangle indices. `manifest.json`
+preserves accepted steps, stable IDs, cell parameters, polarity/tumble metadata,
+file hashes, removed-cap areas and any unobservable cells. Only a PASS manifest
+certifies that every input was read to its clean terminal marker. Requested
+steps must exist; restarts are deduplicated only after exact endpoint comparison.
+The optional anchor translates whole cells to nearby periodic images for viewing;
+it does not deform them, wrap individual vertices or affect contact measurement.
+PLY is an inspection export, not a replacement for the exact float32 samples in
+the recorded stream. Mesh readers may choose lower internal coordinate precision.
 
 This distinction follows the explicit incidence-graph treatment in
 ["Graph topological transformations in space-filling cell aggregates"](https://doi.org/10.1371/journal.pcbi.1012089).

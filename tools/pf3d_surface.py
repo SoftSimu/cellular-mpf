@@ -7,7 +7,8 @@ phi=0.5 interface is recoverable. See docs/surface_output_3d.md.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -102,6 +103,25 @@ class Frame:
     @property
     def vertex_count(self):
         return sum(c.vertex_count for c in self.cells)
+
+
+def geometry_contract(header):
+    return {key: value for key, value in asdict(header).items() if key not in ('codec', 'interval')}
+
+
+def frame_digest(frame):
+    """Exact metadata/sample identity, independent of owner packing order."""
+    import numpy as np
+    digest = hashlib.sha256(struct.pack('<Qd', frame.step, frame.time))
+    for cell in sorted(frame.cells, key=lambda item: item.id):
+        indices, values = cell.arrays()
+        digest.update(CELL.pack(cell.id, *cell.origin, cell.edge, 0, len(indices),
+            cell.gamma, cell.active_speed, cell.radius, 0., *cell.polarity,
+            *cell.velocity, cell.tumbles, cell.flags))
+        samples = np.empty(len(indices), dtype=[('index', '<u8'), ('phi', '<f4')])
+        samples['index'], samples['phi'] = indices, values
+        digest.update(samples.tobytes())
+    return digest.hexdigest()
 
 
 class SurfaceReader:

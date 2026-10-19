@@ -8,18 +8,19 @@ docs/contact_exchange_3d.md for the observation definition and its limitations.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
-import hashlib
 import importlib.metadata
 import json
 from pathlib import Path
-import struct
 import sys
 import time
+from types import SimpleNamespace
 
 from pf3d_exchange import ContactTracker
-from pf3d_surface import CELL, SurfaceReader, SurfaceFormatError
+from pf3d_surface import SurfaceReader, SurfaceFormatError, frame_digest, geometry_contract
 
 
 def write_record(output, record):
@@ -37,25 +38,6 @@ def new_output(path, inputs):
         except Exception as error:
             write_record(output, dict(type='failure', message=str(error)))
             raise
-
-
-def frame_digest(frame):
-    """Canonical sample/metadata identity, independent of owner packing order."""
-    import numpy as np
-    digest = hashlib.sha256(struct.pack('<Qd', frame.step, frame.time))
-    for cell in sorted(frame.cells, key=lambda item: item.id):
-        indices, values = cell.arrays()
-        digest.update(CELL.pack(cell.id, *cell.origin, cell.edge, 0, len(indices),
-            cell.gamma, cell.active_speed, cell.radius, 0., *cell.polarity,
-            *cell.velocity, cell.tumbles, cell.flags))
-        samples = np.empty(len(indices), dtype=[('index','<u8'), ('phi','<f4')])
-        samples['index'], samples['phi'] = indices, values
-        digest.update(samples.tobytes())
-    return digest.hexdigest()
-
-
-def geometry_contract(header):
-    return {key: value for key, value in asdict(header).items() if key not in ('codec','interval')}
 
 
 def mesh_diagnostics(mesh):
@@ -112,10 +94,19 @@ def measure_frame(frame, header, args):
                 cells=diagnostics, contacts=pairs)
 
 
+def measure_job(frame, header, parameters):
+    options = SimpleNamespace(**parameters)
+    start = time.monotonic()
+    record = measure_frame(frame, header, options)
+    record['analysis_seconds'] = time.monotonic() - start
+    return record
+
+
 def measure(args):
     from pf3d_contact import validate_measurement
     validate_measurement(args.gap, args.resolution, args.max_depth)
-    if min(args.max_frame_mib, args.max_cell_voxels) <= 0 or args.limit_frames is not None and args.limit_frames <= 0:
+    if (min(args.max_frame_mib, args.max_cell_voxels, args.workers) <= 0
+            or args.limit_frames is not None and args.limit_frames <= 0):
         raise ValueError('memory and frame limits must be positive')
     headers = []
     for path in args.inputs:
@@ -124,16 +115,33 @@ def measure(args):
     header = headers[0]
     if any(geometry_contract(h) != geometry_contract(header) for h in headers[1:]):
         raise ValueError('surface legs have different physical/geometry contracts')
-    count = duplicates = 0
+    count = duplicates = submitted = 0
     last_step = last_digest = first_step = None
+    last_queued_step = None
     identity = None
     reports, limited = [], False
-    with new_output(args.output, args.inputs) as output:
+    parameters = dict(gap=args.gap, resolution=args.resolution,
+                      max_depth=args.max_depth, max_cell_voxels=args.max_cell_voxels)
+    with new_output(args.output, args.inputs) as output, ExitStack() as stack:
+        pool = stack.enter_context(ProcessPoolExecutor(max_workers=args.workers)) if args.workers > 1 else None
+        pending = deque()
+
+        def commit(record, digest):
+            nonlocal count, first_step, last_step
+            record['surface_sha256'] = digest
+            write_record(output, record)
+            count += 1
+            first_step = record['step'] if first_step is None else first_step
+            last_step = record['step']
+            print(f"step {last_step}: {len(record['contacts'])} proximity pairs, "
+                  f"{record['analysis_seconds']:.2f} CPU s", file=sys.stderr)
+
         write_record(output, dict(type='metadata', schema='pf3d-contacts-1',
             geometry=geometry_contract(header), gap=args.gap, resolution=args.resolution,
             max_depth=args.max_depth, extractor='lewiner-inclusive-half-level',
             packages={name: importlib.metadata.version(name)
                       for name in ('numpy','scipy','scikit-image')},
+            workers=args.workers,
             streams=[dict(path=str(p), interval=h.interval, codec=h.codec)
                      for p,h in zip(args.inputs, headers)],
             definition='symmetric minimum of directed surface areas within gap; not a force or adhesion law'))
@@ -146,29 +154,34 @@ def measure(args):
                         raise SurfaceFormatError('persistent cell IDs change between surface legs')
                     identity = ids
                     digest = frame_digest(frame)
-                    if frame.step == last_step:
+                    if frame.step == last_queued_step:
                         if digest != last_digest:
                             raise SurfaceFormatError('restart endpoint differs in cell metadata or exact samples')
                         duplicates += 1
                         continue
-                    if last_step is not None and frame.step < last_step:
+                    if last_queued_step is not None and frame.step < last_queued_step:
                         raise SurfaceFormatError('surface legs overlap or are not in increasing step order')
-                    start = time.monotonic()
-                    record = measure_frame(frame, header, args)
-                    record.update(surface_sha256=digest, analysis_seconds=time.monotonic()-start)
-                    write_record(output, record)
-                    count += 1
-                    first_step = frame.step if first_step is None else first_step
-                    last_step, last_digest = frame.step, digest
-                    print(f"step {frame.step}: {len(record['contacts'])} proximity pairs, "
-                          f"{record['analysis_seconds']:.2f} CPU s", file=sys.stderr)
-                    if args.limit_frames is not None and count >= args.limit_frames:
+                    if pool is None:
+                        commit(measure_job(frame, header, parameters), digest)
+                    else:
+                        pending.append((pool.submit(measure_job, frame, header, parameters), digest))
+                        # Executor.map eagerly consumes the stream on older Python
+                        # versions. Bound submitted frames instead of queuing the run.
+                        if len(pending) >= args.workers:
+                            future, identity_digest = pending.popleft()
+                            commit(future.result(), identity_digest)
+                    submitted += 1
+                    last_queued_step, last_digest = frame.step, digest
+                    if args.limit_frames is not None and submitted >= args.limit_frames:
                         limited = True
                         break
                 reports.append(dict(path=str(path), complete=reader.complete,
                                     truncated=reader.truncated, read_frames=reader.frame_count))
             if limited:
                 break
+        while pending:
+            future, identity_digest = pending.popleft()
+            commit(future.result(), identity_digest)
         if not count:
             raise ValueError('no committed surface frames')
         status = 'bounded_prefix' if limited else 'recovered_prefix' if any(r['truncated'] for r in reports) else 'complete'
@@ -275,6 +288,12 @@ def track(args):
     return result
 
 
+def catalog(args):
+    from pf3d_event_catalog import collect_catalog, export_catalog
+    result = collect_catalog(read_records(args.input), allow_prefix=args.allow_prefix)
+    return export_catalog(result, args.output_dir, args.input)
+
+
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest='command', required=True)
@@ -286,6 +305,8 @@ def parser():
     measure_parser.add_argument('--max-depth', type=int, default=2)
     measure_parser.add_argument('--max-frame-mib', type=int, default=512)
     measure_parser.add_argument('--max-cell-voxels', type=int, default=32_000_000)
+    measure_parser.add_argument('--workers', type=int, default=1,
+        help='independent CPU frame workers; at most this many frames are queued')
     measure_parser.add_argument('--recover', action='store_true', help='permit an incomplete tail, not corrupt data')
     measure_parser.add_argument('--limit-frames', type=int, help='diagnostic prefix only; skips terminal stream validation')
     measure_parser.set_defaults(run=measure)
@@ -299,6 +320,12 @@ def parser():
     track_parser.add_argument('--exchange-window', type=int, required=True)
     track_parser.add_argument('--stride', type=int, default=1, help='subsample tables for cadence sensitivity')
     track_parser.set_defaults(run=track)
+    catalog_parser = commands.add_parser('catalog', help='finalize candidates and export CSV tables')
+    catalog_parser.add_argument('input', type=Path)
+    catalog_parser.add_argument('--output-dir', type=Path, required=True)
+    catalog_parser.add_argument('--allow-prefix', action='store_true',
+        help='accept an explicitly recovered/bounded source, still labelled as a prefix')
+    catalog_parser.set_defaults(run=catalog)
     return root
 
 

@@ -150,6 +150,17 @@ cell IDs join the outputs; each has its own explicit file format and sampling
 policy. The original update specialization runs when velocity recording is
 disabled, and neither recorder changes the model or checkpoint schema.
 
+## Three-dimensional interfaces and neighbour changes
+
+`--surface-out interfaces.pfs3d --surface-interval 10000 --surface-compression zstd`
+records every cell's complete 0.5 interface at that accepted-step cadence, plus
+the invocation's initial and final states. This is distinct from the 2D projected
+`--boundary-out`. The optional CPU postprocessor reconstructs interfaces,
+measures 3D proximity patches, tracks persistent neighbour changes and exports
+reconciled event tables and standard meshes. It does not label every neighbour
+change as a confirmed 3D T transition. See [recording](docs/surface_output_3d.md)
+and the [end-to-end analysis commands](docs/contact_exchange_3d.md).
+
 ## Requirements
 
 - CUDA 12 or newer and an NVIDIA GPU supporting the requested CUDA architecture;

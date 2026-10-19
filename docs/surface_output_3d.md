@@ -157,3 +157,9 @@ header, decoded chunks, and on-disk frame transaction; it is not authentication.
 Vertex records contain a uint64 padded-grid index and float32 sample (12 bytes).
 Cell/chunk order is not a persistent identity: different device ownership can
 change packing order without changing the saved samples.
+
+The standalone mesh exporter and contact/change/catalog workflow are described
+in [contact and exchange analysis](contact_exchange_3d.md). Both consume these
+saved files; neither needs a running simulator. Keep the `.pfs3d` streams, their
+run manifests and occasional full checkpoints together when archiving a run.
+Exported meshes alone do not retain the original crossing-cube samples.

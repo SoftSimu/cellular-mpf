@@ -178,6 +178,24 @@ class ContactCLI(unittest.TestCase):
         with surface.SurfaceReader(path) as reader:
             self.assertEqual(len(list(reader)),2)
 
+    def test_parallel_measurement_is_ordered_and_equal_to_serial(self):
+        path = self.write_stream('parallel.pfs3d', [(0, (self.a, self.far))] +
+            [(step, (self.a, self.near)) for step in (10, 20, 30, 40)])
+        serial = self.records(self.measure(path))
+        parallel = self.records(self.measure(path, name='parallel.jsonl', extras=('--workers', 2)))
+        for rows in (serial, parallel):
+            rows[0].pop('workers')
+            for row in rows[1:-1]:
+                row.pop('analysis_seconds')
+        self.assertEqual(serial, parallel)
+
+    def test_parallel_prefix_does_not_schedule_or_report_extra_frames(self):
+        path = self.write_stream('prefix.pfs3d', [(step, (self.a, self.near)) for step in (0, 10, 20)])
+        rows = self.records(self.measure(path, extras=('--workers', 2, '--limit-frames', 1)))
+        self.assertEqual(rows[-1]['frames'], 1)
+        self.assertEqual(rows[-1]['status'], 'bounded_prefix')
+        self.assertEqual(rows[-1]['streams'][0]['read_frames'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()
