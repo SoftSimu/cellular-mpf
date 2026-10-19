@@ -60,7 +60,7 @@ struct Result {
 };
 
 Result run(int B, pf3d::CellFieldStorage3D storage, Update path,
-           bool promoted, bool fail_update, int origin_z) {
+           bool promoted, bool fail_update, int origin_z, bool recentre = true) {
     constexpr int N = 2, nz = 16, shards = 4;
     const int base = promoted ? 8 : B;
     const pf3d::SLayout3D layout{64, 64, nz, 64, pf3d::kBoundaryHardWallChannel3D};
@@ -99,6 +99,8 @@ Result run(int B, pf3d::CellFieldStorage3D storage, Update path,
     init.lambda = 0.2f; init.seed_radius = 1.0f; init.storage = storage;
     pf3d::launch_initialize_spheres(init);
     check(cudaDeviceSynchronize(), "initialize");
+    // A stationary update must overwrite zeros too, not retain old buffer data.
+    output.upload(std::vector<float>(N * words, 123.25f));
     if (promoted) {
         state = cells.download();
         for (auto& cell : state) cell.storage_edge = B;
@@ -128,9 +130,9 @@ Result run(int B, pf3d::CellFieldStorage3D storage, Update path,
     state = cells.download();
     for (auto& cell : state) {
         require(cell.tumble_ctr == 1, "active measurement consumes one tumble");
-        cell.pending_shift_x = 1;
-        cell.pending_shift_y = -1;
-        cell.pending_shift_z = 1;
+        cell.pending_shift_x = recentre ? 1 : 0;
+        cell.pending_shift_y = recentre ? -1 : 0;
+        cell.pending_shift_z = recentre ? 1 : 0;
     }
     cells.upload(state);
     if (fail_update) {
@@ -198,6 +200,9 @@ Result run(int B, pf3d::CellFieldStorage3D storage, Update path,
     report.aggregate = next_aggregate.download(); report.flags = flags.download();
     report.crops = crops.download();
     const auto packed = inplace ? phi.download() : output.download();
+    require(std::none_of(packed.begin(), packed.end(),
+                        [](float value) { return value == 123.25f; }),
+            "update retained stale destination data");
     const std::size_t cube_words = static_cast<std::size_t>(B) * B * B;
     report.fields.assign(N * cube_words, 0.0f);
     for (int n = 0; n < N; ++n) {
@@ -213,9 +218,10 @@ Result run(int B, pf3d::CellFieldStorage3D storage, Update path,
     return report;
 }
 
-void compare(int B, Update path, bool promoted, bool failed, int origin_z) {
-    const auto cube = run(B, {}, path, promoted, failed, origin_z);
-    const auto capped = run(B, {16}, path, promoted, failed, origin_z);
+void compare(int B, Update path, bool promoted, bool failed, int origin_z,
+             bool recentre = true) {
+    const auto cube = run(B, {}, path, promoted, failed, origin_z, recentre);
+    const auto capped = run(B, {16}, path, promoted, failed, origin_z, recentre);
     require(same(cube.fields, capped.fields), "field bytes differ");
     require(same(cube.cells, capped.cells), "cell state/tumbles/moments differ");
     require(same(cube.verified, capped.verified), "verification reductions differ");
@@ -247,6 +253,10 @@ int main() {
                 for (bool failed : {false, true})
                     compare(B, path, true, failed, (16 - B) / 2);
         compare(24, Update::sharded_fast, false, false, 1);
+        for (int B : {24, 32})
+            for (int origin : {(16 - B) / 2, 1})
+                for (bool failed : {false, true})
+                    compare(B, Update::sharded_fast, false, failed, origin, false);
         std::puts("PASS compact GPU storage: exact field/state/tumble/aggregate/diagnostic parity; "
                   "thresholds, recentering, promoted cells, in-place and fatal recovery");
         return 0;

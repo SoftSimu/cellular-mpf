@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <limits>
+#include <tuple>
 
 namespace pf3d {
 namespace {
@@ -405,6 +406,23 @@ bool TwoGpuSim3D::configure_ownership(bool canonical_fields) {
     ids_[0].clear(); ids_[1].clear();
     for (std::size_t i = 0; i < owners_.size(); ++i)
         ids_[owners_[i]].push_back(static_cast<int>(i));
+    // Neighbouring bricks reuse aggregate cache lines; cell identities and
+    // per-cell reduction order are independent of this launch ordering.
+    const auto key = [&](int id) {
+        const auto& cell = canonical_[id];
+        const auto wrapped = [](std::int64_t value, int period) {
+            const auto remainder = value % period;
+            return remainder < 0 ? remainder + period : remainder;
+        };
+        const auto x = wrapped(cell.origin_x, geometry_.nx);
+        const auto y = wrapped(cell.origin_y, geometry_.ny);
+        const int edge = sim_[0]->B_;
+        return std::make_tuple(y / edge, cell.origin_z / edge, x / edge,
+                               y, cell.origin_z, x);
+    };
+    for (auto& ids : ids_)
+        std::stable_sort(ids.begin(), ids.end(),
+                         [&](int a, int b) { return key(a) < key(b); });
     for (int r = 0; r < 2; ++r) {
         auto& sim = *sim_[r];
         if (!select(r)) return false;

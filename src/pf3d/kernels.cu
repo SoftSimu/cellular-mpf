@@ -18,6 +18,31 @@ constexpr int kWarps3D = kThreads3D / 32;
 
 using Reduction3D = MomentPartial3D;
 
+// Skipping the destination clear is safe only when this update covers every
+// stored voxel. Translated or partly clipped bricks still need a full clear.
+__device__ __forceinline__ bool output_is_fully_overwritten(
+    const CellState3D& cell, int B, const CellFieldStorage3D& storage,
+    const SLayout3D& layout) {
+    if (cell.pending_shift_x || cell.pending_shift_y || cell.pending_shift_z)
+        return false;
+    if (!layout.bounded_z()) return true;
+    if (storage.compact(B)) {
+        CellFieldPlaneRange3D retained{};
+        return storage.retained_planes(B, cell.origin_z, &retained)
+            && retained.count == storage.planes(B);
+    }
+    return cell.origin_z >= 0 && cell.origin_z <= layout.nz - B;
+}
+
+__device__ __forceinline__ void write_zero_update_voxel(
+    float* destination, const UpdateArgs3D& args, int B,
+    std::int64_t origin_z, int x, int y, int z) {
+    if (x >= B || y >= B || z >= B) return;
+    int wz = 0;
+    if (aggregate_z(args.layout, origin_z, z, &wz))
+        destination[field_index_at_world_z(x, y, z, wz, B, args.storage)] = 0.0f;
+}
+
 // Retain every overflow check but consume an atomic's return at the next
 // scatter, after independent stencil work. Flush before leaving the tile.
 struct PendingScatter3D {
@@ -851,7 +876,8 @@ __device__ __forceinline__ int next_update_tile(
 }
 
 template <bool CollectMoments, bool WallCoupling,
-          UpdateTilePass3D Pass = UpdateTilePass3D::All>
+          UpdateTilePass3D Pass = UpdateTilePass3D::All,
+          bool CompleteOutput = false>
 __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                      const UpdateArgs3D& args,
                                      const float* source, float* destination,
@@ -859,7 +885,8 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                      MomentPartial3D* partials,
                                      float* halo_pair,
                                      Reduction3D* warp_values,
-                                     int* abort_flag) {
+                                     int* abort_flag,
+                                     volatile int* output_complete = nullptr) {
     CellState3D* state = &args.cells[n];
 
     [[maybe_unused]] Reduction3D local{};
@@ -868,8 +895,13 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         local.hi_x = local.hi_y = local.hi_z = -1;
     }
 
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0) {
         *abort_flag = fatal_flags_present(state, args.global_flags) ? 1 : 0;
+        // One shared decision avoids keeping another live register per voxel.
+        if constexpr (CompleteOutput)
+            *output_complete = output_is_fully_overwritten(
+                *state, B, args.storage, args.layout) ? 1 : 0;
+    }
     __syncthreads();
     if (*abort_flag == 0) {
         const int shift_x = state->pending_shift_x;
@@ -955,6 +987,20 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             __pipeline_wait_prior(more ? 1 : 0);
             float* const shared_phi = parity == 0 ? halo0 : halo1;
             if (!halo_any_nonzero(shared_phi)) {
+                if constexpr (CompleteOutput) {
+                    if (*output_complete != 0) {
+                        const int tz = tile / tiles_per_plane;
+                        const int remainder = tile - tz * tiles_per_plane;
+                        const int ty = remainder / tiles_x;
+                        const int tx = remainder - ty * tiles_x;
+                        for (int q = static_cast<int>(threadIdx.x); q < kBrickVoxels;
+                             q += kThreads3D)
+                            write_zero_update_voxel(destination, args, B, origin_z,
+                                tx * kBrickX + q % kBrickX,
+                                ty * kBrickY + (q / kBrickX) % kBrickY,
+                                tz * kBrickZ + q / (kBrickX * kBrickY));
+                    }
+                }
                 __syncthreads();
                 parity = 1 - parity;
                 continue;
@@ -990,8 +1036,14 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     stencil27(shared_phi, ix + 1, iy + 1, iz + 1,
                               &lap, &gx, &gy, &gz);
                 if (centre == 0.0f && lap == 0.0f && gx == 0.0f &&
-                    gy == 0.0f && gz == 0.0f)
+                    gy == 0.0f && gz == 0.0f) {
+                    if constexpr (CompleteOutput) {
+                        if (*output_complete != 0)
+                            destination[field_index_at_world_z(
+                                x, y, z, wz, B, args.storage)] = 0.0f;
+                    }
                     return;
+                }
 
                 const int wx = wrap_offset(origin_x, x, args.layout.nx);
                 const int wy = wrap_offset(origin_y, y, args.layout.ny);
@@ -1200,12 +1252,17 @@ __global__ void k_clear_u32(std::uint32_t* data, std::size_t words) {
 }
 
 __global__ void k_clear_selected_base_out(UpdateArgs3D args,
-                                          int blocks_per_cell) {
+                                          int blocks_per_cell,
+                                          bool complete_output) {
     const int slot = static_cast<int>(blockIdx.x) / blocks_per_cell;
     const int part = static_cast<int>(blockIdx.x) % blocks_per_cell;
     if (slot >= args.selection.selected_count(args.N)) return;
     const int n = args.selection.cell_index(slot);
     if (cell_is_promoted(args.cells[n], args.B)) return;
+    // Unshifted, fully covered bricks are overwritten even where the result
+    // is zero. Moving bricks retain the original complete clear.
+    if (complete_output && output_is_fully_overwritten(
+            args.cells[n], args.B, args.storage, args.layout)) return;
     const std::size_t words = stored_cell_words(args.B, args.storage);
     float* out = args.phi_out + static_cast<std::size_t>(n) * words;
     const std::size_t stride =
@@ -1676,7 +1733,7 @@ __global__ void k_finalize_measure_promoted(
     commit_measurement(args, n, B, total);
 }
 
-template <bool WallCoupling>
+template <bool WallCoupling, bool ComputeSurface = false>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_measure_cell_shards_impl(MeasureArgs3D args) {
     extern __shared__ __align__(16) float halo_pair[];
@@ -1796,7 +1853,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args) {
                 local.Cx += square * static_cast<double>(x);
                 local.Cy += square * static_cast<double>(y);
                 local.Cz += square * static_cast<double>(z);
-                if (args.compute_surface)
+                if constexpr (ComputeSurface)
                     local.surface += sqrt(static_cast<double>(gx) * gx
                                         + static_cast<double>(gy) * gy
                                         + static_cast<double>(gz) * gz);
@@ -1977,6 +2034,7 @@ void k_update_tiled_sharded_fast_impl(UpdateArgs3D args,
                                       int shards_per_cell) {
     extern __shared__ __align__(16) float halo_pair[];
     __shared__ int abort_flag;
+    __shared__ int output_complete;
     const int block = static_cast<int>(blockIdx.x);
     const int slot = block / shards_per_cell;
     const int shard = block - slot * shards_per_cell;
@@ -1984,11 +2042,11 @@ void k_update_tiled_sharded_fast_impl(UpdateArgs3D args,
     const int n = args.selection.cell_index(slot);
     if (cell_is_promoted(args.cells[n], args.B)) return;
     const std::size_t words = stored_cell_words(args.B, args.storage);
-    process_update_shard<false, WallCoupling, Pass>(
+    process_update_shard<false, WallCoupling, Pass, true>(
         n, shard, shards_per_cell, args,
         args.phi_in + static_cast<std::size_t>(n) * words,
         args.phi_out + static_cast<std::size_t>(n) * words,
-        args.B, nullptr, halo_pair, nullptr, &abort_flag);
+        args.B, nullptr, halo_pair, nullptr, &abort_flag, &output_complete);
 }
 
 // The promoted throughput update splits every pointer-backed cube among
@@ -2646,6 +2704,8 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_measure_promoted_impl<true>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<true>),
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true>),
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<true, true>),
         reinterpret_cast<const void*>(k_update_tiled_impl<false>),
         reinterpret_cast<const void*>(k_update_tiled_impl<true>),
         reinterpret_cast<const void*>(k_update_tiled_fast_impl<false>),
@@ -2720,16 +2780,18 @@ bool checked_stored_field_bytes(int N, int B, const CellFieldStorage3D& storage,
 }
 
 cudaError_t clear_base_output(const UpdateArgs3D& args,
-                              std::size_t phi_bytes, cudaStream_t stream) {
-    if (args.selection.ids == nullptr)
+                              std::size_t phi_bytes, cudaStream_t stream,
+                              bool complete_output = false) {
+    if (!complete_output && args.selection.ids == nullptr)
         return cudaMemsetAsync(args.phi_out, 0, phi_bytes, stream);
     constexpr int kClearBlocksPerCell = 64;
-    if (args.selection.count >
+    const int count = args.selection.selected_count(args.N);
+    if (count >
         std::numeric_limits<int>::max() / kClearBlocksPerCell)
         return cudaErrorInvalidValue;
-    k_clear_selected_base_out<<<args.selection.count * kClearBlocksPerCell,
+    k_clear_selected_base_out<<<count * kClearBlocksPerCell,
                                 kThreads3D, 0, stream>>>(
-        args, kClearBlocksPerCell);
+        args, kClearBlocksPerCell, complete_output);
     return cudaPeekAtLastError();
 }
 
@@ -2865,14 +2927,18 @@ bool launch_measure_cells_only(const MeasureArgs3D& args,
     const bool sharded = args.shards > 1 && args.shards <= 64 &&
                          args.partials != nullptr;
     if (sharded) {
-        if (wall_coupling)
-            k_measure_cell_shards_impl<true>
-                <<<count * args.shards, kThreads3D,
-                   kHaloPipelineBytes, stream>>>(args);
+        if (wall_coupling && args.compute_surface)
+            k_measure_cell_shards_impl<true, true>
+                <<<count * args.shards, kThreads3D, kHaloPipelineBytes, stream>>>(args);
+        else if (wall_coupling)
+            k_measure_cell_shards_impl<true, false>
+                <<<count * args.shards, kThreads3D, kHaloPipelineBytes, stream>>>(args);
+        else if (args.compute_surface)
+            k_measure_cell_shards_impl<false, true>
+                <<<count * args.shards, kThreads3D, kHaloPipelineBytes, stream>>>(args);
         else
-            k_measure_cell_shards_impl<false>
-                <<<count * args.shards, kThreads3D,
-                   kHaloPipelineBytes, stream>>>(args);
+            k_measure_cell_shards_impl<false, false>
+                <<<count * args.shards, kThreads3D, kHaloPipelineBytes, stream>>>(args);
         k_finalize_measure_cell_shards<<<(count + 127) / 128,
                                          128, 0, stream>>>(args);
     } else {
@@ -3195,7 +3261,7 @@ bool launch_update_tiled_sharded_fast(const UpdateArgs3D& args,
         return false;
     if (set_tile_kernel_smem_limit() != cudaSuccess) return false;
     if (args.tile_pass != UpdateTilePass3D::Interior
-        && clear_base_output(args, phi_bytes, stream) != cudaSuccess)
+        && clear_base_output(args, phi_bytes, stream, true) != cudaSuccess)
         return false;
     const bool wall_coupling = args.layout.hard_wall_channel();
     if (wall_coupling)
