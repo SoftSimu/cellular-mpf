@@ -106,6 +106,17 @@ To continue a 2D simulation, pass `-c path/to/checkpoint.bin` and a later
 the fields, cell identities and propulsion state needed for continuation. See
 [restart settings](docs/solver-reference.md#outputs-and-restart-behavior).
 
+## Large monolayer
+
+A capability run with **126,025 cells on one GH200 GPU**, evolved for
+0.1 polarity-persistence times. The full periodic domain is on the left,
+with a detail from the same saved state on the right.
+
+![A simulated monolayer with 126,025 cells and a detail from the same state.](docs/media/monolayer-large.png)
+
+[Full-resolution image](docs/media/monolayer-large-full.png) ·
+[Run parameters and checks](docs/media/provenance.json).
+
 ## Simulation movies
 
 ![Simulation preview comparing mixtures with 5% soft cells, left, and 50%, right. Normal cells are red and soft cells are teal.](docs/media/binary-mixtures.gif)

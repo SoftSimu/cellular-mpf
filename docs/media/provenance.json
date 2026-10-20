@@ -102,5 +102,87 @@
       "time_tau": 25
     }
   ],
-  "simulation_data_modified": false
+  "simulation_data_modified": false,
+  "monolayer-large-full.png": {
+    "source_commit": "d43b5a9a08bcf9c24426aaf90dae75f730e4da91",
+    "source_archive_sha256": "b1aabba8b115a04d4d823b4a9b23ea76e71c3420e12fdcb31ab63eb57895798a",
+    "executable_sha256": "2e3e8ce1f50b2c85e337036513cc29f7a6414aa1b1a9eea19c4330ccfe80ec97",
+    "cells": 126025,
+    "geometry": "periodic 2D",
+    "side": 32500,
+    "step": 100000,
+    "time_tau": 0.1,
+    "seed": 20261020,
+    "polarity_seed": 20261020,
+    "parameters": {
+      "radius": 49,
+      "rho": 0.9,
+      "dt": 0.01,
+      "tau": 10000,
+      "active_speed": 0.01,
+      "gamma": 1,
+      "mobility": 0.5,
+      "kappa": 10,
+      "lambda": 7,
+      "mu": 1,
+      "xi": 1500
+    },
+    "initialization": "Built-in grid and jitter, all gamma=1, no passive aging",
+    "gpu": {
+      "name": "NVIDIA GH200 120GB",
+      "free_bytes": 101412831232,
+      "total_bytes": 102005473280,
+      "pci_bus": "0019:01:00.0",
+      "sms": 132
+    },
+    "maximum_sampled_device_memory_mib": 93539.0,
+    "memory_sampling_interval_seconds": 10,
+    "simulation_wall_seconds": 4113.401573298994,
+    "purpose": "Software-capacity demonstration; separate from manuscript ensembles",
+    "boundary_sha256": "435c70ab9a4bca55fa8fad16b8fc7ab161d73a5f73ba8ff1ee24b610dcfd32c6",
+    "extracted_samples_sha256": "44fcfe6db5fdbf1d3b8b747be6b6d1da8a1d75720a8e43e3fc33abf4035133bf",
+    "initial_and_final_frame_checksums": [
+      7565298618013896705,
+      4098110223789005278
+    ],
+    "integrity_checks": "PASS: simulator self-test and fatal guards, scheduled volume/support checks, both boundary checksums and completion footer, independent strict Rust reader, all final cell perimeters.",
+    "image_checks": {
+      "status": "PASS",
+      "cells": 126025,
+      "side": 32500,
+      "step": 100000,
+      "time_tau": 0.1,
+      "contour_components": 126025,
+      "perimeters_checked": 126025,
+      "max_perimeter_difference": 7.958078640513122e-13,
+      "detector_rule_fallback_cells": 11,
+      "detail_bounds": [
+        [
+          16950.0,
+          15000.0
+        ],
+        [
+          18150.0,
+          16200.0
+        ]
+      ],
+      "geometry_smoothing": false,
+      "temporal_interpolation": false
+    },
+    "sha256": "9b2073bede5e93abfde812810550e65e2c7ee5e2612399072915998e8a2ee171"
+  },
+  "monolayer-large.png": {
+    "source": "monolayer-large-full.png",
+    "detail_bounds": [
+      [
+        16950.0,
+        15000.0
+      ],
+      [
+        18150.0,
+        16200.0
+      ]
+    ],
+    "sha256": "7fd6965ae5c21dc01d01c8699825387601896ef1a6e320af13817dc02ee99c68"
+  }
 }
