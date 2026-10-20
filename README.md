@@ -12,6 +12,12 @@ uses the two-dimensional solver, `cell_gh200`. The repository also includes a
 [three-dimensional solver](docs/three-dimensional-solver.md) for periodic
 systems, cells on a substrate and cells confined between two walls.
 
+![A tagged cell in an all-normal monolayer, left, and a monolayer containing one soft cell, right.](docs/media/single-soft-cell.png)
+
+A single soft cell (right) and its all-normal reference (left), with 400 cells
+in each simulation. The tagged cell is teal, with its recent trajectory shown
+in white. [Watch the movie](docs/media/single-soft-cell.mp4).
+
 ## Build
 
 You need an NVIDIA GPU, CUDA 12 or newer, CMake 3.24 or newer, and a C++17
@@ -86,6 +92,15 @@ integration steps to choose how often boundaries are saved.
 To continue a simulation, pass `-c path/to/checkpoint.bin` and a later
 `--t-end`. See [outputs and restarts](docs/solver-reference.md#outputs-and-restart-behavior)
 for trajectory continuation and recorder settings.
+
+## Simulation movies
+
+![Simulation preview comparing mixtures with 5% soft cells, left, and 50%, right. Normal cells are red and soft cells are teal.](docs/media/binary-mixtures.gif)
+
+Mixtures with 5% and 50% soft cells. Each simulation contains 400 cells and
+shows 50 persistence times of active motion.
+[Watch the 1080p movie](docs/media/binary-mixtures.mp4).
+The [movie notes](docs/media/README.md) describe the parameters and colours.
 
 ## Tests and documentation
 

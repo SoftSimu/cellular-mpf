@@ -1,0 +1,25 @@
+# Simulation movies
+
+These illustrations show cell shapes reconstructed from saved phase fields.
+Each simulation contains 400 cells in a periodic square and shows 50 persistence
+times of active motion.
+
+- **[Single soft cell](single-soft-cell.mp4).** The teal cell has interfacial
+  coefficient γ = 1 in the all-normal reference on the left and γ = 0.35 on the
+  right. All other cells have γ = 1. Its trail shows the preceding 8 persistence
+  times. The view stays fixed throughout.
+- **[Binary mixtures](binary-mixtures.mp4).** Soft cells (teal, γ = 0.35) make up
+  5% of the monolayer on the left and 50% on the right. Normal cells are red
+  (γ = 1).
+
+Both pairs start from the same equilibrated all-normal configuration before
+the soft-cell coefficients are assigned. Passive preparation lasts one
+persistence time, followed by active motion with propulsion speed 0.01.
+The scale bars show five nominal cell radii. Each MP4 is 1920 × 1080, 20 frames
+per second and about 22 seconds long. The GIF shows an eight-second excerpt at
+the same playback speed.
+
+The movies were generated for illustration, separately from the replicate
+ensembles used for the paper's statistical comparisons. The simulation source
+was `0a79433c1ce9edec6406423e51e7cfb15392a777`. The PNG is a frame from the
+single-cell movie; the GIF was converted from the binary-mixture MP4.
