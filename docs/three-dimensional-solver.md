@@ -1,16 +1,28 @@
 # Three-dimensional solver
 
-`cell_gh200_3d` is a separate three-dimensional formulation of the active
-phase-field model. It shares the coefficient convention and run-and-tumble
-process of `cell_gh200`, but it does not reinterpret two-dimensional fields or
-2D checkpoints. The two executables can therefore be built and used
-independently. Fully periodic XYZ remains the default. The sessile-cap
-substrate and the two-hard-wall channel are explicit alternatives selected with
-`--geometry slab` and `--geometry channel`.
+`cell_gh200_3d` evolves a separate three-dimensional phase field for each cell.
+It uses the coefficient convention and run-and-tumble process of the 2D solver.
+Choose the geometry with `--geometry`:
+
+| Geometry | Domain and motion |
+| --- | --- |
+| `periodic` (default) | A periodic cube, with three-dimensional cell motion |
+| `slab` | A neutral substrate and an open upper boundary; propulsion and translation stay parallel to the substrate |
+| `channel` | Two steric walls, periodic lateral directions and three-dimensional cell motion |
+
+![A saved simulation of 500 cells confined between two steric walls.](media/slab-500.png)
+
+This 500-cell example uses `--geometry channel`. Colours distinguish cell
+identities; the side faces are cuts through the periodic box.
+[Image provenance](media/provenance.json).
+
+For commands, see [build and run](#build-and-run). The sections on
+[memory modes](#cell-bricks-and-memory-modes), [two GPUs](#two-gpus) and
+[surface recording](#recording-3d-surfaces) describe how to size and observe a run.
 
 ## Model
 
-For cell \(n\),
+For cell $n$,
 
 ```text
 dphi_n/dt = gamma_n lap(phi_n)
@@ -24,6 +36,9 @@ v_n = v_A,n p_n + (60 kappa/(xi lambda^2))
 
 V_n = integral(phi_n^2 dV),       V0 = 4 pi R^3/3  (periodic XYZ).
 ```
+
+The passive-relaxation mobility is fixed at `M=1/2` and is already included in
+these coefficients.
 
 The default domain is a periodic cube with unit lattice spacing. Length and
 time are solver model units; no physical-unit mapping is implied. The explicit
@@ -50,9 +65,9 @@ does not depend on a mutable generator state.
 
 `--geometry slab` selects the fixed domain
 
-\[
+$$
 \Omega=\mathbb T^2_L\times[0,H].
-\]
+$$
 
 The x/y directions are periodic. At the impenetrable substrate, `z=0`, the
 phase field has the neutral Neumann condition `dphi/dz=0`, corresponding to a
@@ -64,12 +79,12 @@ uses cell-centred solver planes `z=0,1,...`, whose lower lattice face is
 For this geometry, `R` is both the projected footprint radius and the neutral
 hemispherical-cap radius:
 
-\[
+$$
 V_0=\frac{2\pi R^3}{3},\qquad
 L=\left\lceil\sqrt{\frac{N\pi R^2}{\rho_{A,\mathrm{target}}}}\right\rceil,
 \qquad
 \rho_{A,\mathrm{realized}}=\frac{N\pi R^2}{L^2}.
-\]
+$$
 
 The height `H=Nz` is independent of `N` and `rho_A`. By default it is twice the
 automatically derived base brick edge; `--slab-height H` may override it but
@@ -87,35 +102,35 @@ motion and extrusion are outside its scope.
 
 `--geometry channel` uses an accessible slit
 
-\[
+$$
 \Omega=\mathbb T^2_L\times[0,H]
-\]
+$$
 
 bounded by two identical static diffuse solid fields. In physical coordinates
 relative to the lower wall mid-surface,
 
-\[
+$$
 \psi_w(z)=1-\frac14[1+\tanh(k_w z)]
                     [1-\tanh(k_w(z-H))],\qquad
 k_w=\frac{\sqrt{7.5}}{\lambda_w}.
-\]
+$$
 
 Thus `psi_w` is approximately zero in the slit and one in the solid. The wall
 overlap energy is
 
-\[
+$$
 F_w=\frac{60\kappa_w}{\lambda^2}
     \sum_i\int \phi_i^2\psi_w^2\,dV .
-\]
+$$
 
 With the model mobility `M=1/2`, it adds
 `-(60*kappa_w/lambda^2)*phi_i*psi_w^2` to the Allen--Cahn right-hand side. The
 same static overlap enters Palmieri passive translation as
 
-\[
+$$
 \frac{60\kappa_w}{\xi\lambda^2}
 \int\phi_i\nabla\phi_i\,\psi_w^2\,dV .
-\]
+$$
 
 This is the reciprocal-pair normalization of the ordered cell--cell term. It
 contains no adhesion, wall friction, contact-angle energy, wall torque, or
@@ -134,12 +149,12 @@ wall.
 
 The input `--channel-height H` is the wall separation in lattice units, and
 
-\[
+$$
 L=\left\lceil\sqrt{\frac{N(4\pi R^3/3)}{
 \rho_{V,\mathrm{target}}H}}\right\rceil,
 \qquad
 \rho_{V,\mathrm{realized}}=\frac{N(4\pi R^3/3)}{L^2H}.
-\]
+$$
 
 The ceiling in either geometry generally makes the realized fraction slightly
 smaller than its target. Both values are written to trajectory metadata.
@@ -272,22 +287,22 @@ between the measured and deferred-summary paths.
 
 ## Cell bricks and memory modes
 
-Each cell begins with a logical `B x B x B` phase-field brick. The initialized profile
-uses the effective radius `R_eff = R + 1/(2 k_lambda)`, with
-`k_lambda = sqrt(7.5)/lambda`, to match the `integral(phi^2 dV)` volume
-convention. The default edge contains this effective diameter, the diffuse tail
-down to `|phi|=1e-5`, and eight voxels of total diameter slack, then rounds
-upward to a multiple of eight. `--brick-edge` may select a larger aligned base
-brick.
+Each cell begins with a logical `B x B x B` phase-field brick. Automatic brick
+sizing uses the radius estimate `R + 1/(2 k_lambda)`, where
+`k_lambda = sqrt(7.5)/lambda`, adds the diffuse tail down to `|phi|=1e-5`
+and eight voxels of total diameter slack, then rounds upward to a multiple of
+eight. The actual seed radius is calibrated numerically against the discrete
+`sum(phi^2)` volume. `--brick-edge` may select a larger aligned base brick.
 
 Before an update is accepted, the measurement pass checks every cell's support
 against its current margin. A cell that needs more room is copied without
 rounding or clipping into a centered, larger cube; its unwrapped origin is
 adjusted so every phase-field value retains the same world coordinate. The
 physical step and its run-and-tumble event are then retried. Large-cell storage
-is allocated only on demand and grows again if necessary, up to the HBM budget
-and the largest aligned cube smaller than the applicable periodic extent. In a
-channel, a logical cube may exceed `H`. Allocation uses `B x B x min(B,Nz)`
+is allocated on demand, within the GPU-memory budget. Its edge must remain
+strictly below `L` in a periodic cube or channel, and below `min(L,Nz)` for a
+substrate slab. In a channel, a logical cube may exceed `H`.
+Allocation uses `B x B x min(B,Nz)`
 values for either bounded geometry, where `Nz` includes the channel's solid
 padding. Omitted planes are implicit zeros; allocated wall-padding planes are
 retained. Ghost reflection, support checks, and logical reduction order are
@@ -406,6 +421,34 @@ The examples use explicit base bricks so that a short fresh-start demonstration
 does not depend on an immediate adaptive promotion. Adaptive growth remains
 available if a selected brick is still too small.
 
+### Two GPUs
+
+Build the two-device executable explicitly, including when reusing a build
+directory that previously disabled 3D:
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=90 \
+  -DPF_BUILD_3D=ON -DPF_BUILD_TWO_GPU_SUBSTRATE=ON
+cmake --build build --config Release --parallel 8 --target cell_gh200_3d_two_gpu
+
+./build/cell_gh200_3d_two_gpu \
+  --device 0 --peer-device 1 --memory-mode throughput \
+  --geometry channel --channel-height 196 \
+  --N 32 --radius 49 --rho 0.60 --brick-edge 224 \
+  --dt 0.01 --t-end 100 --aging-time 10 \
+  --out trajectory-channel-two-gpu.txt
+```
+
+This requires two matching GPUs in one node with direct CUDA peer access in
+both directions. It supports `slab` and `channel`, using throughput storage.
+Work is divided by cell ownership, but each GPU allocates the full phase pools
+and aggregate fields. The baseline storage is approximately `2P+3G` per GPU,
+including the peer-receive field, before enlarged cells and output buffers.
+The second GPU therefore shares the work without doubling cell capacity.
+
+### Checkpoint continuation and trajectories
+
 Here `t-end` includes the aging interval. `-c checkpoint.pf3d` restores a
 complete successful-step state. An explicit `--t-end` may extend the stored
 target; model parameters remain fixed. Supplying only `-c` never overwrites the
@@ -430,10 +473,10 @@ unwrapped but names its z coordinate `height`: the centroid height above the
 physical substrate. It reports the free-interface proxy
 `A_free=integral(|grad(phi)| dV)` and
 
-\[
+$$
 C_{\rm hemi}=2\pi\left(\frac{3}{2\pi}\right)^{2/3}
 \frac{V^{2/3}}{A_{\rm free}},
-\]
+$$
 
 which is one for a sharp hemisphere. The neutral substrate contact is not
 included as free interface. Existing trajectory files are appended only when
@@ -452,6 +495,45 @@ integrates `phi_i^2` at voxel centres with physical `z<0` or `z>H`, and
 `physical_penetration_fraction` divides it by `V_i`. These diagnostics run only
 at trajectory cadence. Every trajectory schema records the promoted-measurement
 reduction policy.
+
+### Recording 3D surfaces
+
+`--surface-out` saves the original float32 samples around every cell's
+`phi=0.5` interface. It supports all three geometries and the two-GPU
+executable. Add these flags to a run to record surfaces at the same cadence
+as the trajectory:
+
+```bash
+--out trajectory-leg-001.txt --trajectory-interval 10000 \
+--surface-out interfaces-leg-001.pfs3d --surface-interval 10000 \
+--surface-compression zstd
+```
+
+Intervals are in accepted steps: at `dt=0.01` and `tau=10000`, 10000 steps
+are `0.01 tau`. Each surface file also contains the initial and final accepted
+state. Use a new surface filename for every continuation. Compression requires
+CMake to find zstd; otherwise select `--surface-compression none`.
+
+Use `--boundary-out` for a top-down silhouette or substrate footprint. Those
+projections cannot recover contacts between stacked cells. Use checkpoints
+when you need the full phase fields or a restart, and surface recordings when
+you need the three-dimensional `phi=0.5` geometry.
+
+The [surface format guide](surface_output_3d.md) covers checksums, coordinates,
+storage cost and restart segments. The [mesh and contact tools](contact_exchange_3d.md)
+read the recordings without a GPU. For example:
+
+```bash
+python3 -m pip install -r tools/requirements-contacts.txt
+python3 tools/pf3d_export_surfaces.py interfaces-leg-001.pfs3d \
+  --steps 10000 --output-dir meshes --max-frame-mib 2048
+```
+
+`--steps` selects absolute accepted steps in the recording. Large populations
+may require raising the reader's default 512 MiB decoded-frame limit, as in
+this example. Contact and exchange measurements also require a choice of
+distance, contact area and persistence thresholds; the analysis guide defines
+these quantities.
 
 ### Phase-field visualization
 
@@ -478,10 +560,12 @@ complete-file CRC before parsing fields.
 ## Checks and scientific validation
 
 The small CPU suite checks model coefficients, random-generator vectors and
-dense one-step calculations for the three geometries:
+dense one-step calculations for the three geometries. Set the options
+explicitly when reusing a build directory:
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build -DPF_BUILD_3D=ON \
+  -DBUILD_TESTING=ON -DPF_ENABLE_GPU_TESTS=OFF
 cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -492,6 +576,7 @@ Enable the GPU smokes for small output and checkpoint-continuation checks:
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_ARCHITECTURES=90 \
+  -DPF_BUILD_3D=ON \
   -DBUILD_TESTING=ON \
   -DPF_ENABLE_GPU_TESTS=ON
 cmake --build build --config Release --parallel 8
@@ -525,8 +610,8 @@ wall strength/width, padding, and lateral box size.
   volume restoration, and nominal active-speed scales. Interaction and
   emergent advection also depend on the realized state; a new parameter regime
   still requires a convergence and stability study.
-- Adaptive cell storage cannot exceed the configured HBM budget or the largest
-  aligned cube smaller than its applicable periodic extent. Reaching either limit restores
+- Adaptive cell storage cannot exceed the configured HBM budget or the
+  geometry's brick-edge limit described above. Reaching either limit restores
   the last accepted in-memory state and stops the run before supported field
   values are clipped. Restart uses the last completed rolling checkpoint; the
   failed support check does not replace it.
