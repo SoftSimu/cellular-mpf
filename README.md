@@ -1,7 +1,13 @@
-# Phase-field cell simulator for NVIDIA GH200
+# Cellular MPF
 
-CUDA C++ solvers for interacting, deformable cells with run-and-tumble motility.
-The canonical repository is [SoftSimu/phase-field-gh200](https://github.com/SoftSimu/phase-field-gh200).
+Cellular MPF simulates the motion and deformation of interacting cells on
+NVIDIA GPUs. Each cell has its own phase field, so cell shapes and contacts
+evolve along with cell motion. The two-dimensional solver implements the
+active multiphase-field model of [Palmieri et al. (2015)](https://doi.org/10.1038/srep11745),
+with separate controls for interfacial energy, passive relaxation and propulsion.
+
+The canonical repository is [SoftSimu/cellular-mpf](https://github.com/SoftSimu/cellular-mpf).
+It contains the 2D monolayer solver and a 3D extension:
 
 | Executable | Geometry | Devices |
 | --- | --- | --- |
@@ -9,122 +15,93 @@ The canonical repository is [SoftSimu/phase-field-gh200](https://github.com/Soft
 | `cell_gh200_3d` | Periodic 3D, substrate slab, or two-hard-wall channel | One GPU |
 | `cell_gh200_3d_two_gpu` | Substrate slab or two-hard-wall channel | Two matching, peer-connected GPUs |
 
-## Model
-
-Each cell is a scalar phase field. Explicit Euler integration combines
-interfacial relaxation, a cell area/volume constraint, overlap repulsion and
-advection. Cell velocity combines active propulsion and interaction-induced
-translation. Counter-based Philox draws determine tumble times and directions.
-Lengths are in unit lattice spacings; time is in model units.
-
-The 2D formulation follows [Palmieri et al., *Scientific Reports* 5, 11745
-(2015)](https://doi.org/10.1038/srep11745). It uses a nine-point Laplacian,
-binary32 fields, and default Allen–Cahn mobility `M0=0.5`. An optional per-cell
-mobility scales passive relaxation, not advection or velocity; see
-[cell-specific mobility](docs/cell-specific-mobility.md). Coefficients are defined
-in `common/model_coefficients.cuh` and `include/params.cuh`.
-
-The 3D extension uses a 27-point Laplacian. Periodic cells have full-sphere target
-volume and unrestricted 3D polarity. A substrate slab has neutral 90-degree
-contact, hemispherical target volume and planar translation. A hard-wall channel
-has two resolved steric walls, full-volume cells and unrestricted 3D motion.
-These are distinct models; see [equations, boundaries and initialization](docs/three-dimensional-solver.md).
-
 ## Build
 
-Requirements: CMake 3.24+, a C++17 compiler, and CUDA 12+. The default target is
-`sm_90`. Production builds have been exercised on GH200 with NVHPC 26.3/CUDA
-13.1; single-GPU checks also passed on H100 with GCC 12.3/CUDA 13.2. Other
-hardware/toolchain combinations need their own verification. MPI is not used.
+You need CUDA 12+, CMake 3.24+, and a C++17 compiler. Python 3.10+ runs the
+examples and file readers. The commands below build the 2D solver for `sm_90`:
 
 ```sh
+git clone https://github.com/SoftSimu/cellular-mpf.git
+cd cellular-mpf
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_ARCHITECTURES=90
+  -DCMAKE_CUDA_ARCHITECTURES=90 -DPF_BUILD_3D=OFF
 cmake --build build --config Release --parallel 8
 ```
 
-This builds both single-GPU solvers and the small initializer/export tools.
-Use `-DPF_BUILD_3D=OFF` for 2D only. Add `-DPF_BUILD_TWO_GPU_SUBSTRATE=ON` to
-build the two-GPU runner; it supports throughput storage and requires CUDA
-peer access between the selected devices.
+Omit `-DPF_BUILD_3D=OFF` to also build the single-GPU 3D solver. Add
+`-DPF_BUILD_TWO_GPU_SUBSTRATE=ON` to build the two-GPU runner; it requires CUDA
+peer access and throughput storage. MPI is not used.
 
-The default is the optimized production build. Do not add `-use_fast_math`.
-Check the compiler's ptxas spill report when changing toolchains. Fatal integrity
-checks remain enabled; `-DPF_DIAGNOSTIC_ALARMS=ON` additionally enables the
-high-frequency support-edge counter, which is off by default.
+The optimized production build is the default. Fatal integrity checks remain
+enabled; `-DPF_DIAGNOSTIC_ALARMS=ON` additionally enables the high-frequency
+support-edge counter, which is off by default. Do not add `-use_fast_math`.
+See the [build and hardware notes](docs/solver-reference.md#requirements) for
+tested configurations, the diagnostic build and installation.
 
-```sh
-cmake -S . -B build-diagnostic -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_ARCHITECTURES=90 -DPF_DIAGNOSTIC_ALARMS=ON
-cmake --build build-diagnostic --config Release --parallel 8
-```
-
-Optional `cmake --install build --prefix <directory>` installs the executables,
-Python tools and documentation. CMake enables lossless output compression when
-it finds `zstd.h` and libzstd; otherwise select `none` at runtime.
-
-## Run and restart
-
-Python 3.10+ can run the small argument-file examples:
+## Run the example
 
 ```sh
-python examples/run_example.py --executable build/cell_gh200
-python examples/3d/run_example.py --executable build/cell_gh200_3d
+python3 examples/run_example.py \
+  --executable ./build/cell_gh200 --output-dir ./example-output
 ```
 
-Each invocation creates a new output directory. For direct use, a small channel
-run with contour recording is:
+This runs four cells for two timesteps and checks that a trajectory and a
+checkpoint were written. Each invocation creates a new directory under
+`example-output`; parameters are in [examples/smoke.args](examples/smoke.args).
+
+Use `./build/cell_gh200 --help` to list all options. A
+[longer example](docs/solver-reference.md#minimal-run) shows how to generate
+initial cell positions and pass them to the simulator. After building 3D,
+run its small example with:
 
 ```sh
-./build/cell_gh200_3d --geometry channel --channel-height 8 \
-  --N 4 --radius 4 --lambda 2 --rho 0.02 --brick-edge 48 \
-  --kappa 0.1 --wall-kappa 0.1 \
-  --dt 0.01 --t-end 0.1 --aging-time 0.01 --seed 1234 --polarity-seed 5678 \
-  --out trajectory.txt --trajectory-interval 1 \
-  --checkpoint-dir checkpoints --checkpoint-interval 5 \
-  --surface-out interfaces.pfs3d --surface-interval 1 --surface-compression none
-
-./build/cell_gh200_3d -c checkpoints/checkpoint.pf3d --t-end 0.2 \
-  --out trajectory.txt --checkpoint-dir checkpoints \
-  --surface-out interfaces-next.pfs3d --surface-interval 1
+python3 examples/3d/run_example.py --executable ./build/cell_gh200_3d
 ```
 
-For two GPUs, replace the executable with `cell_gh200_3d_two_gpu` and add
-`--device 0 --peer-device 1 --memory-mode throughput`. Run `--help` for all
-inputs. Time and output intervals are integration units and accepted steps,
-respectively: with `dt=0.01` and `tau=10000`, one persistence time is one million
-steps. `--aging-time` is included in `--t-end`.
+## Model parameters
 
-Checkpoints retain fields, stable cell IDs, polarity, adaptive storage and the
-random-stream information needed for continuation. Use `checkpoint.bin` in 2D
-and `checkpoint.pf3d` in 3D. A 3D continuation restores its stored model and
-reduction grouping; it does not accept new model parameters. Pin the source,
-compiler and executable for long trajectories. No cross-architecture bitwise
-identity is promised.
+| Quantity | Command-line option |
+| --- | --- |
+| Interfacial coefficient | `--gamma` for normal cells; `--gamma-cancer` for soft cells |
+| Soft-cell fraction | `--cancer-fraction` |
+| Passive relaxation mobility | `--phase-field-mobility`; individual values through `--phase-field-mobility-map` |
+| Propulsion speed | `--v-A` |
+| Polarity-persistence time | `--tau` |
+| Friction coefficient in interaction advection | `--xi` |
 
-## Outputs and postprocessing
+The `cancer` options name the soft-cell population. A 2D mobility map assigns
+values to stable cell IDs, allowing relaxation kinetics to vary at fixed
+interfacial coefficients. Mobility scales passive relaxation, not advection
+or velocity; see the [mobility guide](docs/cell-specific-mobility.md).
+The [solver reference](docs/solver-reference.md#model-and-numerical-scheme)
+describes the discretization and coefficient definitions. Lengths are in unit
+lattice spacings and time is in model units.
 
-- Text trajectories contain cell positions, velocities and shape measurements;
-  their header defines the columns and model metadata.
-- Checkpoints contain complete restart fields and are written transactionally.
-- Optional [2D boundary samples](docs/boundary-output.md), [2D velocity
-  components](docs/velocity-output.md), and [projected 3D boundaries](docs/boundary-output-3d.md)
-  are independent observations.
-- [3D contour files](docs/surface_output_3d.md) retain original binary32 samples
-  around every cell's `phi=0.5` interface. They are not full fields or checkpoints.
-  Use a new contour filename for each restart segment.
+## Outputs and restart
 
-The optional CPU tools reconstruct surfaces, export PLY meshes and measure
-persistent contact-graph changes. Install `tools/requirements-contacts.txt` in a
-Python 3.11+ environment and follow [the postprocessing commands](docs/contact_exchange_3d.md).
-Graph-exchange candidates are not confirmed elementary 3D T transitions.
-Full-field slab rendering uses `tools/requirements-visualization.txt`.
+| Output | Option | Contents |
+| --- | --- | --- |
+| Trajectory | `--out` | Positions, velocities and shape measurements; the header defines the columns |
+| Checkpoint | `--checkpoint-dir` | Full cell fields and state for restarting |
+| 2D velocity contributions | `--velocity-moments` | Propulsion, interaction-advection and passive-relaxation contributions |
+| 2D cell boundaries | `--boundary-out` | Field samples for reconstructing contours |
+| Projected 3D boundaries | `--boundary-out` | Per-cell silhouettes or substrate footprints |
+| 3D contours | `--surface-out` | Original binary32 samples around every cell's `phi=0.5` interface |
 
-## Small tests
+Recorders are optional. See the [2D velocity](docs/velocity-output.md),
+[2D boundary](docs/boundary-output.md), [projected 3D boundary](docs/boundary-output-3d.md)
+and [3D contour](docs/surface_output_3d.md) guides for formats and cadence.
+Contours are observations, not full fields or checkpoints; use a new contour
+filename for each restart segment.
 
-The retained CPU references check model coefficients, Philox vectors, 2D
-mobility and dense 3D one-step calculations. GPU smokes check output and restart;
-the optional two-GPU smoke compares it with the single-GPU channel solver.
+To continue a 2D simulation, pass `-c path/to/checkpoint.bin` and a later
+`--t-end`; 3D uses `checkpoint.pf3d`. Checkpoints retain stable cell IDs,
+polarity and the random-stream state needed for continuation. See
+[restart settings](docs/solver-reference.md#outputs-and-restart-behavior).
+
+## Tests and documentation
+
+Enable the small CPU references and GPU smoke tests explicitly:
 
 ```sh
 cmake -S . -B build -DBUILD_TESTING=ON -DPF_ENABLE_GPU_TESTS=ON
@@ -132,24 +109,36 @@ cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Omit `PF_ENABLE_GPU_TESTS` for the CPU checks. Optional contour/contact tests
-require the Python analysis dependencies and `-DPF_ENABLE_CONTACT_TESTS=ON`.
-These checks do not replace convergence, density or equilibration studies for
-the intended experiment.
+Omit `PF_ENABLE_GPU_TESTS` for CPU-only checks. The optional two-GPU smoke
+compares channel outputs and split restarts against the single-GPU solver.
+[Test details](docs/solver-reference.md#tests) also cover the optional
+contour/contact tests and their Python dependencies.
+
+Further documentation covers:
+
+- [Model, build variants, initialization and restart](docs/solver-reference.md).
+- [Three-dimensional equations, geometries and storage](docs/three-dimensional-solver.md).
+- [Starting 3D simulations from relaxed 2D positions](docs/relaxed-2d-slab-initialization.md).
+- [Reconstructing 3D contours and analyzing contact exchanges](docs/contact_exchange_3d.md).
 
 ## Limits
 
-Cells use adaptive local bricks, not a narrow-band approximation. Bricks grow
-without clipping supported fields; insufficient memory or unsupported geometry
-stops advancement. The 3D memory modes and support limits are described in the
-[solver documentation](docs/three-dimensional-solver.md). The two-GPU runner
-does not support periodic XYZ or multi-node execution. Steric walls have no
-adhesion or wall friction; the neutral substrate model excludes multilayer
-translation. Contour cadence and contact thresholds need scientific calibration.
+Cells use adaptive local bricks, not a narrow-band approximation. Fields are
+not clipped to fit; unsupported geometry or insufficient memory stops
+advancement. The two-GPU runner does not support periodic XYZ or multi-node
+execution. Steric walls have no adhesion or wall friction; the neutral
+substrate model excludes multilayer translation. Contact-graph exchange
+candidates are not confirmed elementary 3D T transitions. Convergence,
+equilibration, contour cadence and contact thresholds need validation for the
+intended experiment. Cross-architecture bitwise identity is not promised.
 
-## License and citation
+## Citation and license
 
-LGPL-3.0-or-later, matching SymPhas. Keep both [LICENSE.txt](LICENSE.txt) and
-[COPYING](COPYING). Citation metadata is in [CITATION.cff](CITATION.cff).
-No third-party source is vendored. Dependencies retain their respective licenses.
-The Philox algorithm is described by [Salmon et al., SC '11](https://doi.org/10.1145/2063384.2063405).
+Software citation details are in [CITATION.cff](CITATION.cff). The underlying
+2D model is described by Palmieri et al., *Scientific Reports* **5**, 11745
+(2015), [doi:10.1038/srep11745](https://doi.org/10.1038/srep11745).
+
+The code is distributed under LGPL-3.0-or-later, matching SymPhas. Keep both
+[LICENSE.txt](LICENSE.txt) and [COPYING](COPYING). No third-party source is
+vendored; dependencies retain their respective licenses. The Philox algorithm
+is described by [Salmon et al., SC '11](https://doi.org/10.1145/2063384.2063405).
