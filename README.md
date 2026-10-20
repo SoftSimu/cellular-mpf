@@ -6,25 +6,30 @@ evolve along with cell motion. The two-dimensional solver implements the
 active multiphase-field model of [Palmieri et al. (2015)](https://doi.org/10.1038/srep11745),
 with separate controls for interfacial energy, passive relaxation and propulsion.
 
-The canonical repository is [SoftSimu/cellular-mpf](https://github.com/SoftSimu/cellular-mpf).
-It contains the 2D monolayer solver and a 3D extension:
+Simulations can use a periodic monolayer, a three-dimensional periodic domain,
+a substrate, or confinement between two walls.
+
+![A simulated monolayer with 6,400 cells and a three-dimensional slab with 500 cells.](docs/media/simulation-overview.png)
+
+Saved simulation states: a 6,400-cell monolayer (left) and a 500-cell slab
+confined between two walls (right). Colours distinguish individual cells.
+[Image and movie details](docs/media/README.md).
 
 | Executable | Geometry | Devices |
 | --- | --- | --- |
 | `cell_gh200` | Periodic 2D monolayer | One GPU |
-| `cell_gh200_3d` | Periodic 3D, substrate slab, or two-hard-wall channel | One GPU |
-| `cell_gh200_3d_two_gpu` | Substrate slab or two-hard-wall channel | Two matching, peer-connected GPUs |
+| `cell_gh200_3d` | Periodic 3D, substrate, or confinement between two walls | One GPU |
+| `cell_gh200_3d_two_gpu` | Substrate or confinement between two walls | Two matching GPUs with CUDA peer access |
 
-![A tagged cell in an all-normal monolayer, left, and a monolayer containing one soft cell, right.](docs/media/single-soft-cell.png)
-
-A single soft cell (right) and its all-normal reference (left), with 400 cells
-in each simulation. The tagged cell is teal, with its recent trajectory shown
-in white. [Watch the movie](docs/media/single-soft-cell.mp4).
+The [3D model guide](docs/three-dimensional-solver.md) describes these
+geometries and their assumptions. The substrate has no adhesion, and the
+confining walls are purely steric.
 
 ## Build
 
-You need CUDA 12+, CMake 3.24+, and a C++17 compiler. Python 3.10+ runs the
-examples and file readers. The commands below build the 2D solver for `sm_90`:
+You need an NVIDIA GPU, CUDA 12+, CMake 3.24+, and a C++17 compiler. Python
+3.10+ runs the examples and file readers. The commands below build the 2D
+solver for H100 or GH200 GPUs (`sm_90`):
 
 ```sh
 git clone https://github.com/SoftSimu/cellular-mpf.git
@@ -34,15 +39,10 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 cmake --build build --config Release --parallel 8
 ```
 
-Omit `-DPF_BUILD_3D=OFF` to also build the single-GPU 3D solver. Add
-`-DPF_BUILD_TWO_GPU_SUBSTRATE=ON` to build the two-GPU runner; it requires CUDA
-peer access and throughput storage. MPI is not used.
-
-The optimized production build is the default. Fatal integrity checks remain
-enabled; `-DPF_DIAGNOSTIC_ALARMS=ON` additionally enables the high-frequency
-support-edge counter, which is off by default. Do not add `-use_fast_math`.
-See the [build and hardware notes](docs/solver-reference.md#requirements) for
-tested configurations, the diagnostic build and installation.
+Set `-DPF_BUILD_3D=ON` to include the single-GPU 3D solver. Add
+`-DPF_BUILD_TWO_GPU_SUBSTRATE=ON` to build the two-GPU executable.
+See the [build notes](docs/solver-reference.md#requirements) for other GPU
+architectures, Windows builds, diagnostic options and installation.
 
 ## Run the example
 
@@ -53,7 +53,7 @@ python3 examples/run_example.py \
 
 This runs four cells for two timesteps and checks that a trajectory and a
 checkpoint were written. Each invocation creates a new directory under
-`example-output`; parameters are in [examples/smoke.args](examples/smoke.args).
+`example-output`. Parameters are in [examples/smoke.args](examples/smoke.args).
 
 Use `./build/cell_gh200 --help` to list all options. A
 [longer example](docs/solver-reference.md#minimal-run) shows how to generate
@@ -66,6 +66,8 @@ python3 examples/3d/run_example.py --executable ./build/cell_gh200_3d
 
 ## Model parameters
 
+The main 2D options are:
+
 | Quantity | Command-line option |
 | --- | --- |
 | Interfacial coefficient | `--gamma` for normal cells; `--gamma-cancer` for soft cells |
@@ -75,10 +77,10 @@ python3 examples/3d/run_example.py --executable ./build/cell_gh200_3d
 | Polarity-persistence time | `--tau` |
 | Friction coefficient in interaction advection | `--xi` |
 
-The `cancer` options name the soft-cell population. A 2D mobility map assigns
-values to stable cell IDs, allowing relaxation kinetics to vary at fixed
-interfacial coefficients. Mobility scales passive relaxation, not advection
-or velocity; see the [mobility guide](docs/cell-specific-mobility.md).
+The `cancer` options name the soft-cell population. A
+[mobility map](docs/cell-specific-mobility.md) assigns values to individual
+cells, allowing passive relaxation to vary at fixed interfacial coefficients.
+Propulsion speed and interaction advection have separate coefficients.
 The [solver reference](docs/solver-reference.md#model-and-numerical-scheme)
 describes the discretization and coefficient definitions. Lengths are in unit
 lattice spacings and time is in model units.
@@ -92,17 +94,16 @@ lattice spacings and time is in model units.
 | 2D velocity contributions | `--velocity-moments` | Propulsion, interaction-advection and passive-relaxation contributions |
 | 2D cell boundaries | `--boundary-out` | Field samples for reconstructing contours |
 | Projected 3D boundaries | `--boundary-out` | Per-cell silhouettes or substrate footprints |
-| 3D contours | `--surface-out` | Original binary32 samples around every cell's `phi=0.5` interface |
+| 3D cell surfaces | `--surface-out` | Field samples for reconstructing each cell's `phi=0.5` surface |
 
 Recorders are optional. See the [2D velocity](docs/velocity-output.md),
 [2D boundary](docs/boundary-output.md), [projected 3D boundary](docs/boundary-output-3d.md)
-and [3D contour](docs/surface_output_3d.md) guides for formats and cadence.
-Contours are observations, not full fields or checkpoints; use a new contour
-filename for each restart segment.
+and [3D surface](docs/surface_output_3d.md) guides for formats and sampling
+options. Use a new surface-output filename for each restart segment.
 
 To continue a 2D simulation, pass `-c path/to/checkpoint.bin` and a later
-`--t-end`; 3D uses `checkpoint.pf3d`. Checkpoints retain stable cell IDs,
-polarity and the random-stream state needed for continuation. See
+`--t-end`. The 3D checkpoint is named `checkpoint.pf3d`. Checkpoints retain
+the fields, cell identities and propulsion state needed for continuation. See
 [restart settings](docs/solver-reference.md#outputs-and-restart-behavior).
 
 ## Simulation movies
@@ -112,6 +113,8 @@ polarity and the random-stream state needed for continuation. See
 Mixtures with 5% and 50% soft cells. Each simulation contains 400 cells and
 shows 50 persistence times of active motion.
 [Watch the 1080p movie](docs/media/binary-mixtures.mp4).
+The [single-cell movie](docs/media/single-soft-cell.mp4) follows one soft cell
+alongside its all-normal reference.
 The [movie notes](docs/media/README.md) describe the parameters and colours.
 
 ## Tests and documentation
@@ -124,7 +127,7 @@ cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Omit `PF_ENABLE_GPU_TESTS` for CPU-only checks. The optional two-GPU smoke
+Set `-DPF_ENABLE_GPU_TESTS=OFF` for tests that run on the CPU. The optional two-GPU smoke
 compares channel outputs and split restarts against the single-GPU solver.
 [Test details](docs/solver-reference.md#tests) also cover the optional
 contour/contact tests and their Python dependencies.
@@ -136,24 +139,11 @@ Further documentation covers:
 - [Starting 3D simulations from relaxed 2D positions](docs/relaxed-2d-slab-initialization.md).
 - [Reconstructing 3D contours and analyzing contact exchanges](docs/contact_exchange_3d.md).
 
-## Limits
-
-Cells use adaptive local bricks, not a narrow-band approximation. Fields are
-not clipped to fit; unsupported geometry or insufficient memory stops
-advancement. The two-GPU runner does not support periodic XYZ or multi-node
-execution. Steric walls have no adhesion or wall friction; the neutral
-substrate model excludes multilayer translation. Contact-graph exchange
-candidates are not confirmed elementary 3D T transitions. Convergence,
-equilibration, contour cadence and contact thresholds need validation for the
-intended experiment. Cross-architecture bitwise identity is not promised.
-
 ## Citation and license
 
 Software citation details are in [CITATION.cff](CITATION.cff). The underlying
 2D model is described by Palmieri et al., *Scientific Reports* **5**, 11745
 (2015), [doi:10.1038/srep11745](https://doi.org/10.1038/srep11745).
 
-The code is distributed under LGPL-3.0-or-later, matching SymPhas. Keep both
-[LICENSE.txt](LICENSE.txt) and [COPYING](COPYING). No third-party source is
-vendored; dependencies retain their respective licenses. The Philox algorithm
-is described by [Salmon et al., SC '11](https://doi.org/10.1145/2063384.2063405).
+The code is distributed under the GNU Lesser General Public License, version 3
+or later. See [LICENSE.txt](LICENSE.txt) and [COPYING](COPYING).

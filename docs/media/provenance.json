@@ -1,0 +1,106 @@
+{
+  "monolayer-6400.png": {
+    "source": "Historical finite-size campaign, 6400c_ctrl, seed_a, checkpoint.bin",
+    "checkpoint_sha256": "1b8c70270116108624564a6ebb4f00304fc693c972728ae9d7816f75e88b815a",
+    "cells": 6400,
+    "periodic_domain_side": 7324,
+    "step": 164800000,
+    "time_model_units": 1648000.0013827812,
+    "isovalue": 0.5,
+    "contour_components": 6400,
+    "method": "Contours from every original crossing square; periodic images clipped to the original simulation box. No geometric smoothing.",
+    "sha256": "1d862b80c6a73e095f9ed4660c3aee877fc301c229bbde0dc87ebf6856f872c1"
+  },
+  "slab-500.png": {
+    "source": "pf3d_contour_n500_20261016/run-2356144/surface.pfs3d",
+    "selected_frame_file_sha256": "aa2fa36a6aeb6a08af0febdbd7d816276c2704f1014eeeeb5821ef6bf87af287",
+    "cells": 500,
+    "step": 5500000,
+    "time_model_units": 55000.0,
+    "geometry": {
+      "cells": 500,
+      "boundary_flags": 11,
+      "codec": 1,
+      "nx": 916,
+      "ny": 916,
+      "nz": 532,
+      "dx": 1.0,
+      "dy": 1.0,
+      "dz": 1.0,
+      "dt": 0.01,
+      "tau": 10000.0,
+      "level": 0.5,
+      "interval": 10000,
+      "channel_height": 490,
+      "channel_padding": 21,
+      "wall_kappa": 10.0,
+      "wall_width": 7.0,
+      "interface_width": 7.0
+    },
+    "isovalue": 0.5,
+    "reader_source_commit": "94dafea",
+    "reader": "tools/pf3d_surface.py; tools/pf3d_contact.py",
+    "method": "Original crossing samples, validated frame and chunk checksums. Surface tessellation reduced by about 90% for this illustration, preserving topology. No geometric smoothing. Lateral periodic images clipped to the simulation box, with flat cut faces showing cell interiors at the box edge.",
+    "sha256": "7a930f2fb92a7774814a1f3bf639a6f6d0fdeb9bef5bfeff0780a041cfbb05b4"
+  },
+  "simulation-overview.png": {
+    "panels": [
+      "monolayer-6400.png",
+      "slab-500.png"
+    ],
+    "sha256": "b26d229a4adcab456bb7a266e5d532ab220c8d74be78b771766582778ca61f68",
+    "colours": "Deterministic palette assigned by cell ID, with repeats. Colours do not encode a measured property."
+  },
+  "movies": [
+    {
+      "file": "single-soft-cell.mp4",
+      "sha256": "9a3f4827b9bf253bce2c816e40cf53afbfe9b00679596c236ee4ebaac894c2d2",
+      "source": "analysis\\supplementary_movies\\consistent\\Supplementary_Movie_1.mp4",
+      "source_frames": 401,
+      "time_range_tau": [
+        0,
+        50
+      ],
+      "interval_tau": 0.125,
+      "fps": 20,
+      "duration_seconds": 22.05,
+      "source_image_checks": 802,
+      "full_decode": "PASS"
+    },
+    {
+      "file": "binary-mixtures.mp4",
+      "sha256": "765406c7ab434d21d754018a0f8a79706ac338d8f0875ff06c21f478006316c1",
+      "source": "analysis\\supplementary_movies\\consistent\\Supplementary_Movie_2.mp4",
+      "source_frames": 401,
+      "time_range_tau": [
+        0,
+        50
+      ],
+      "interval_tau": 0.125,
+      "fps": 20,
+      "duration_seconds": 22.05,
+      "source_image_checks": 802,
+      "full_decode": "PASS"
+    },
+    {
+      "file": "binary-mixtures.gif",
+      "sha256": "990db6ca86416291cb63000c78c1d30a74a7315fd1d6329e974da3c143ccc081",
+      "frames": 48,
+      "size": [
+        640,
+        360
+      ],
+      "duration_seconds": 8,
+      "source": "binary-mixtures.mp4",
+      "source_start_seconds": 5,
+      "playback_speed_unchanged": true
+    },
+    {
+      "file": "single-soft-cell.png",
+      "sha256": "33bb0055bc6d79c15c2bc9cecd56baf1b9d78ddf2e56475cc9a65624ec9fea83",
+      "source_movie_frame": 220,
+      "time_tau": 25
+    }
+  ],
+  "simulation_data_modified": false
+}
