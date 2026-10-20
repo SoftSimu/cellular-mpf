@@ -82,9 +82,3 @@ launched, so this tool can also run on smaller CUDA GPUs.
 Contact definitions, persistence criteria and T1 detection belong in the
 offline analysis, not this exporter. The format retains the contour data
 without committing to a particular contact threshold.
-
-With `PF_ENABLE_GPU_TESTS=ON`, `ctest --test-dir build -C Release
--R '^pf2d_boundary_output$' --output-on-failure` tests extraction against an
-independent CPU enumeration, exact field-value preservation, periodic tile
-origins, output-on/off state identity, compression when available, and failure
-handling. This test only launches the small export kernels.

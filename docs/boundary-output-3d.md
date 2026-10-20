@@ -33,13 +33,11 @@ Failed runs and abrupt process termination leave an incomplete stream.
 ```powershell
 python tools/pf3d_boundary.py segment-001.pfb3d
 python tools/pf3d_boundary.py segment-001.pfb3d --json
-python tests/3d/boundary_format_python_test.py
 ```
 
 Inspection validates the whole stream, including checksums and its final
 marker, before reporting success. Only compressed frames need the optional
-Python `zstandard` package. CPU fixture tests run without it and exercise zstd
-additionally when installed.
+Python `zstandard` package.
 
 ## Projection and coordinates
 

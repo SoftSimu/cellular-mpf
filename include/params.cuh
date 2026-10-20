@@ -17,23 +17,9 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kPhaseFieldMobility = 0.5;
 constexpr double kPhaseFieldM0 = kPhaseFieldMobility;
 
-// Physics: Palmieri et al. 2015, Sci Rep 5:11745, Eq. (S15). Mobility M = 1/2.
-// The coefficient helpers include the mobility factor and return the values
-// used directly in dphi/dt:
-//
-//   dphi_n/dt = gamma_n * lap(phi_n)
-//             - bulk_coeff(lambda) * gamma_n * phi(1-phi)(1-2phi)
-//             + volume_coeff(mu, A0) * (A0 - V_n) * phi
-//             - interaction_coeff(kappa, lambda) * phi_n * sum_{m!=n} phi_m^2
-//             - (vx * dphi/dx + vy * dphi/dy)
-//
-//   v_n = v_A * p_hat_n
-//       + motility_coeff(kappa, xi, lambda)
-//         * integral( phi_n * grad(phi_n) * sum_{m!=n} phi_m^2 dA )
-//
-// The interaction energy sums ordered pairs, giving 60*kappa/lambda^2 after
-// applying M = 1/2. Both compile-time and runtime checks enforce
-// interaction_coeff/motility_coeff = xi.
+// Palmieri et al., Sci. Rep. 5:11745 (2015), Eq. S15, with mobility M=1/2.
+// Ordered cell pairs give interaction_coeff=60*kappa/lambda^2; the passive
+// translation coefficient is interaction_coeff/xi. The helpers include M.
 using pf_common::bulk_coeff;
 using pf_common::interaction_coeff;
 using pf_common::kNumerBulk;
@@ -721,11 +707,8 @@ inline bool validate(const SimParams& p, bool resolved_mobility = false) {
     return ok;
 }
 
-// Explicit-Euler guard over the resolved per-cell values: cell i advances its
-// passive RHS with the effective interfacial coefficient (M_i/M0)*gamma_i, so
-// the check must bound max_i[(M_i/M0)*gamma_i], not max_i[gamma_i]. The
-// mobility also multiplies the area-constraint and overlap-repulsion terms,
-// whose dt margins are audited here as warnings. dt is never changed silently.
+// Bound the resolved stiffness max_i[(M_i/M0)*gamma_i], not gamma alone.
+// Area and overlap margins also scale with mobility. Never adjust dt here.
 inline bool validate_effective_stiffness(const SimParams& p,
                                          const float* gamma,
                                          const float* mobility, int n) {

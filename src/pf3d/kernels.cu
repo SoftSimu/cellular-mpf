@@ -414,15 +414,9 @@ __device__ __forceinline__ bool halo_any_nonzero(const float* shared_buf) {
     return __syncthreads_or(any ? 1 : 0) != 0;
 }
 
-// Bounded-z bricks can extend beyond the allocated z array. Planes wholly
-// outside that array are exact or implicit zeros,
-// contribute nothing to any accumulator, write nothing, and raise nothing,
-// so the walk can omit their tiles before staging halos.  Every tile with at
-// least one allocated plane is kept, which preserves the reflected z=-1
-// outer-array ghost: the tile containing world z=0 stages it during prefetch.
-// Periodic z keeps the full range.  z is the slowest tile coordinate, so the
-// live tiles form one contiguous index range and shard assignment by
-// tile % shards is unchanged for every surviving tile.
+// Skip tiles wholly outside bounded z: their field values are implicit zero.
+// Retain the tile at world z=0 so it stages the reflected lower ghost plane.
+// Original tile indices are preserved, keeping tile % shards unchanged.
 __device__ __forceinline__ void live_tile_z_range(const SLayout3D& layout,
                                                    std::int64_t origin_z,
                                                    int B, int tiles_z,

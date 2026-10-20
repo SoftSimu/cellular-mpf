@@ -475,44 +475,33 @@ model and restart-compatibility validation remain responsibilities of the
 simulator checkpoint reader; the renderer checks the same mandatory
 complete-file CRC before parsing fields.
 
-## Public tests and scientific validation
+## Checks and scientific validation
 
-The default suite covers the CPU stencil and dense one-step references for all
-three geometries, the 2D trajectory and exporter contracts, shard-policy and
-wall contracts, CLI validation, and the Python checkpoint-header reader:
+The small CPU suite checks model coefficients, random-generator vectors and
+dense one-step calculations for the three geometries:
 
 ```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Configure with `PF_ENABLE_CHECKPOINT_IO_TESTS=ON` to add production checkpoint
-writer, prober, loader, and CRC contract tests. They stage through any CUDA
-device but launch no kernels.
-
-Enable the public GPU smokes to run the small 2D example and the 3D
-checkpoint/continuation example:
+Enable the GPU smokes for small output and checkpoint-continuation checks:
 
 ```bash
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_ARCHITECTURES=90 \
+  -DBUILD_TESTING=ON \
   -DPF_ENABLE_GPU_TESTS=ON
 cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure \
   -R '^(gh200_smoke|gh200_3d_smoke)$'
 ```
 
-The same build also registers `pf3d_halo_pipeline_gpu`, a 36-case test of the
-production asynchronous loader and nonzero scan. It delays selected producer
-warps, checks both buffers and ghost values exactly, and poisons padding to
-detect accidental reads or writes. Run its targeted race check on a GH200 with:
-
-```bash
-ctest --test-dir build -C Release --output-on-failure -R '^pf3d_halo_pipeline_gpu$'
-compute-sanitizer --tool racecheck --error-exitcode 99 build/pf3d_halo_pipeline_test
-```
-
-This is focused loader coverage, not a whole-solver concurrency proof.
+With `PF_BUILD_TWO_GPU_SUBSTRATE=ON`, `gh200_two_gpu_smoke` compares channel
+fields, trajectories and recorded interfaces between one and two GPUs and
+across a split restart.
 
 For slab science, validation must additionally show neutral-wall contact, zero
 normal polarity and translation, no substrate penetration or top contact, and
@@ -527,7 +516,7 @@ wall strength/width, padding, and lateral box size.
 - The default `cell_gh200_3d` executable advances one replica on one GPU.
   An optional two-device executable partitions cells for substrate and
   hard-wall channel geometries; periodic XYZ is not supported by that runner.
-  See the [two-GPU build, validation and limitations](../README.md#experimental-two-device-slab-and-channel-solver).
+  See the [build instructions](../README.md#build).
 - The mesh spacing, float32 phase field, and stencil are fixed numerical
   choices. Periodic XYZ, the fixed substrate slab, and the resolved steric-wall
   channel are the only geometries; they are not a general boundary-condition

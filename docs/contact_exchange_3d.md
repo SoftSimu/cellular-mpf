@@ -7,9 +7,8 @@ do not change the simulation and do not equate every contact change with a T1.
 
 ## Run
 
-Use Python 3.11+ in a separate analysis environment. The pinned dependencies
-have been exercised on Python 3.13. CPU checks on Python 3.12 also passed with
-NumPy 2.5.4, SciPy 1.17.1 and scikit-image 0.26.0; no CUDA device is needed.
+Use Python 3.11+ in a separate analysis environment. Install the dependencies
+in `tools/requirements-contacts.txt`; no CUDA device is needed.
 
 ```sh
 python -m pip install -r tools/requirements-contacts.txt
@@ -191,7 +190,7 @@ python tests/3d/contact_exchange_test.py
 python tests/3d/contact_cli_test.py
 ```
 
-Alternatively configure CMake with `-DPF_ENABLE_CONTACT_TESTS=ON`, then run
+Alternatively configure CMake with `-DBUILD_TESTING=ON -DPF_ENABLE_CONTACT_TESTS=ON`, then run
 `ctest --test-dir build -R '^pf3d_contact_' --output-on-failure`. Analysis
 dependencies are optional and do not become simulator build requirements.
 

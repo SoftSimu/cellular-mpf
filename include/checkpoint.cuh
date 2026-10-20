@@ -108,17 +108,9 @@ bool overlay_phase_field_mobility(const PhaseFieldMobilityMap& map,
                                   const int32_t* gid, int n,
                                   float* inout, std::string* error);
 
-// Resume-time precedence, in exactly three cases:
-//   1. --phase-field-mobility given (with or without a map): every cell is
-//      rebased to that uniform value and map entries then override their ids.
-//   2. only --phase-field-mobility-map given: map entries override their ids
-//      ON TOP of the existing per-cell values (stored MOBI, or the all-0.5
-//      fill of a pre-MOBI checkpoint); unlisted cells keep those values. The
-//      current parameter record does not store the writing run's uniform
-//      mobility (unlike gamma), so a map-only resume must never rebase
-//      unlisted cells to the compiled default.
-//   3. neither flag: stored MOBI values are kept; a checkpoint without MOBI
-//      loads with M_i = 0.5 for every cell.
+// An explicit uniform mobility replaces all stored values before map overrides.
+// A map alone overlays the stored values; no flags preserve them. Missing MOBI
+// data imply M_i=0.5. The uniform input is not stored separately in the file.
 bool resolve_phase_field_mobility(const SimParams& p, const SimOverrides& ov,
                                   const PhaseFieldMobilityMap& map,
                                   bool map_given, CheckpointData* d);

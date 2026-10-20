@@ -9,13 +9,8 @@
 
 namespace pf3d {
 
-// Trajectory metadata line. Appending to an existing file requires this
-// string to match the file's first line exactly, so every token here is a
-// continuation contract: a resumed leg whose physics, geometry, or
-// reduction grouping differs - including the resolved base-measurement
-// shard count - is refused instead of silently extending the file. Header
-// text lives in this host-only header so tests can exercise the contract
-// without a device.
+// Appending requires an exact metadata match, including physics, geometry and
+// reduction grouping. Keep all continuation-relevant values in this header.
 inline std::string trajectory_header(const SimParams3D& p, int B,
                                      int promoted_measure_policy,
                                      int promoted_measure_auto_wave_ctas,
@@ -105,10 +100,7 @@ inline std::string trajectory_header(const SimParams3D& p, int B,
         : std::string();
 }
 
-// Production append predicate: an existing trajectory may only be extended
-// when its first two lines equal this run's expected metadata and column
-// contract exactly. Every continuation token above - including the resolved
-// base-measurement shard count - participates through the header string.
+// Both metadata and column strings must match before an existing file is extended.
 inline bool trajectory_metadata_compatible(const char* first_line,
                                            const char* second_line,
                                            const std::string& expected_header,

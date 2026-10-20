@@ -1,4 +1,25 @@
-# Cell-specific two-dimensional mobility
+# Two-dimensional model and cell mobility
+
+For cell i, let `A0_i=pi*R_i^2` and `V_i=integral(phi_i^2 dA)`. With reference
+mobility `M0=0.5`, the passive right-hand side and cell velocity are
+
+```text
+passive_rhs_i = gamma_i lap(phi_i)
+             - (30 gamma_i/lambda^2) phi_i(1-phi_i)(1-2phi_i)
+             + (2 mu/A0_i)(A0_i-V_i) phi_i
+             - (60 kappa/lambda^2) phi_i sum_(j!=i) phi_j^2,
+
+v_i = v_A,i p_i + (60 kappa/(xi lambda^2))
+      integral(phi_i grad(phi_i) sum_(j!=i) phi_j^2 dA).
+```
+
+The cell-pair energy uses ordered pairs. Its variation and `M0=0.5` give the
+interaction coefficient `60*kappa/lambda^2`; division by `xi` gives the passive
+translation coefficient. The nine-point Laplacian uses axial weights 4,
+diagonal weights 1 and centre weight -20, divided by 6 on the unit lattice.
+See [Palmieri et al., Scientific Reports 5, 11745 (2015)](https://doi.org/10.1038/srep11745).
+
+## Mobility
 
 The 2D solver stores a physical Allen-Cahn mobility `M_i` for every cell.
 The reference and default are `M0=0.5`. Its update is
@@ -10,7 +31,7 @@ dphi_i/dt = (M_i/M0) * passive_rhs_i - v_i . grad(phi_i).
 `passive_rhs_i` includes the interfacial Laplacian, double-well, area-constraint
 and overlap-repulsion terms. Mobility never scales advection, the interaction
 velocity, active speed, polarity or tumble stream. Default-mobility cells use
-the original arithmetic expression without an extra multiply by one.
+the default arithmetic expression without an extra multiply by one.
 Changing `M_i` to compensate `gamma_i` also changes area and overlap relaxation;
 it is not a surface-tension-only adjustment.
 
@@ -57,10 +78,6 @@ After loading, restart options have exactly three interpretations:
    uniform mobility, so it must not be used to rebase unlisted cells.
 3. With neither option supplied, stored values are preserved, or the all-`0.5`
    default when the input has no `MOBI`.
-
-Older public readers reject the unknown `MOBI` sidecar: new checkpoints are
-not readable by those executables, even for an all-default run. This does not
-reintroduce any older checkpoint format or change the separate 3D schema.
 
 ## Outputs and dimensional scope
 

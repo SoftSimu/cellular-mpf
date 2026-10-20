@@ -591,8 +591,7 @@ __device__ void process_cell(int n, const StepArgs& A, char* smem,
     __syncthreads();   // smem is reused by the next cell in this CTA
 }
 
-// Keep the infrequent spatial path out of the register budget of the
-// per-step advection specialization; validated with ptxas and H100 timing.
+// Keep spatial-moment registers out of the per-step advection specialization.
 template<int CLS>
 __device__ __noinline__ void process_cell_moments(int n, const StepArgs& A, char* smem,
                                                 unsigned long long step) {

@@ -90,8 +90,9 @@ deserves a support-sizing warning rather than being treated as a real cell face.
 
 ## Reading and verification
 
-The reader itself needs Python 3.9+. Install `numpy` for reconstruction/tests and
-`zstandard` to read compressed files:
+The standalone reader needs Python 3.10+. Install `numpy` for reconstruction
+and `zstandard` to read compressed files. The pinned reconstruction/contact
+test environment uses Python 3.11+:
 
 ```sh
 python -m pip install numpy zstandard
@@ -117,18 +118,10 @@ with SurfaceReader("leg_001.pfs3d") as reader:
             # Construct interfaces from these complete cubes, not a zero-filled field.
 ```
 
-For the inexpensive synthetic GPU comparison, configure with
-`-DPF_ENABLE_GPU_TESTS=ON`, build `pf3d_surface_gpu_test`, and run:
-
-```sh
-ctest --test-dir build --output-on-failure -R '^pf3d_surface_(contract|gpu)$'
-```
-
-Fixtures compare every retained sample and reconstructed crossing cube to an
-independent dense CPU oracle, including exact 0.5 values, isolated voxels,
-checkerboards, promoted bricks, non-consecutive IDs, unwrapped origins, and
-compact/cubic bounded storage. CPU tests also check corruption, bounds, and
-every tail truncation of a small frame transaction.
+The CPU contract test compares reconstructed crossing cubes with a dense
+reference, including ties at 0.5 and artificial caps. It also checks corruption,
+bounds and truncated frame transactions. The optional two-GPU smoke compares
+saved interface samples with the single-GPU recorder and across restart.
 
 ## Cost and exchange analysis
 

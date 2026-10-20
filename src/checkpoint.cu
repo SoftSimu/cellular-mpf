@@ -774,8 +774,7 @@ bool apply_phase_field_mobility(const PhaseFieldMobilityMap& map,
 bool resolve_phase_field_mobility(const SimParams& p, const SimOverrides& ov,
                                   const PhaseFieldMobilityMap& map,
                                   bool map_given, CheckpointData* d) {
-    // Case 3: no explicit policy. Stored MOBI values (or the all-0.5 fill of
-    // a pre-MOBI checkpoint, already applied by the reader) stand.
+    // No override: retain values resolved by the reader.
     if (!ov.phase_field_mobility && !map_given) return true;
 
     const int n = d->n;
@@ -788,15 +787,11 @@ bool resolve_phase_field_mobility(const SimParams& p, const SimOverrides& ov,
     std::string err;
     bool ok;
     if (ov.phase_field_mobility) {
-        // Case 1: an explicit uniform rebases every cell, then the map
-        // overrides its listed ids.
+        // Explicit uniform: rebase, then apply the map.
         ok = apply_phase_field_mobility(map, p.phase_field_mobility,
                                         gid.data(), n, mob.data(), &err);
     } else {
-        // Case 2: map only. The current parameter record does not store
-        // the writing run's uniform mobility, so unlisted cells must keep
-        // their current per-cell values rather than being rebased to the
-        // compiled default.
+        // Map only: preserve unlisted cells.
         ok = overlay_phase_field_mobility(map, gid.data(), n, mob.data(),
                                           &err);
     }

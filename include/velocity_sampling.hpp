@@ -13,8 +13,7 @@ class VelocitySampling {
         reference_ = reference;
         stride_ = stride;
         period_ = enabled && !reference ? std::lcm(kPhysicsPeriod, stride) : kPhysicsPeriod;
-        // Split long periods at spatial samples. All phases together contain
-        // the same nodes, but frequent output no longer breaks a long replay.
+        // End each graph at a spatial sample so output need not replay a full period.
         graph_steps_ = enabled && !reference && stride >= kPhysicsPeriod ? stride : period_;
     }
     void start_run(long long step, long long dense_steps) { dense_until_ = step + dense_steps; }

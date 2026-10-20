@@ -1,13 +1,4 @@
-// Host tests for the cell-specific Allen-Cahn phase-field mobility.
-// phase_field_rhs is the exact per-pixel expression both update kernels
-// execute, so these checks pin the shipped arithmetic:
-//   1. the default path (M_i = M0) reproduces the pre-mobility expression
-//      bit for bit;
-//   2. M_i/M0 scales every passive variational term and never advection;
-//   3. two cells advance with their own multipliers in a two-cell field step;
-//   4. (gamma=1, M=0.5) and (gamma=0.35, M=0.5/0.35) give the same
-//      interfacial increment to floating-point accuracy;
-//   5. the explicit-Euler guard uses max_i[(M_i/M0)*gamma_i].
+// CPU reference checks for passive mobility scaling, advection and stability.
 #include "kernels.cuh"
 
 #include <cmath>
@@ -42,9 +33,8 @@ bool same_bits(float a, float b) {
     return ua == ub;
 }
 
-// The pre-mobility per-pixel expression, copied verbatim from the update
-// kernels as they stood before this change.
-float legacy_rhs(float lap, float phi, float So, float gx, float gy,
+// Independent expression for the default-mobility right-hand side.
+float reference_rhs(float lap, float phi, float So, float gx, float gy,
                  float gam, float dwC, float volC, float repC,
                  float vx, float vy) {
     return gam * lap
@@ -80,10 +70,10 @@ void test_default_path_bitwise() {
             const float a = phase_field_rhs(q.lap, q.phi, q.So, q.gx, q.gy,
                                             c[0], c[1], c[2], c[3], c[4], c[5],
                                             1.0f);
-            const float b = legacy_rhs(q.lap, q.phi, q.So, q.gx, q.gy,
+            const float b = reference_rhs(q.lap, q.phi, q.So, q.gx, q.gy,
                                        c[0], c[1], c[2], c[3], c[4], c[5]);
             expect(same_bits(a, b),
-                   "default path must equal the legacy expression bitwise");
+                   "default path must equal the reference expression bitwise");
         }
 }
 
@@ -92,7 +82,7 @@ void test_passive_scaling_advection_unchanged() {
     for (const Px& q : kPixels)
         for (const auto& c : kCoeffSets)
             for (const float mrel : mrels) {
-                // Passive-only value at mrel = 1 is the legacy expression.
+                // Unit relative mobility gives the reference passive expression.
                 const float p1 = phase_field_rhs(q.lap, q.phi, q.So, q.gx,
                                                  q.gy, c[0], c[1], c[2], c[3],
                                                  0.0f, 0.0f, 1.0f);
@@ -223,7 +213,7 @@ void test_two_cell_multipliers() {
     step_field(pb, S, L, gam_b, bulk * gam_b, volC, rep, vx, vy, mrel_b, dt,
                &nb);
 
-    // Independent expectations: the legacy expression for cell a and the
+    // Independent expectations: the reference expression for cell a and the
     // explicitly scaled expression for cell b.
     int checked_a = 0, checked_b = 0;
     for (int y = 1; y < L - 1; ++y)
@@ -242,11 +232,11 @@ void test_two_cell_multipliers() {
             };
             float lap, gx, gy;
             stencil(pa, &lap, &gx, &gy);
-            const float ea = pa[i] + dt * legacy_rhs(
+            const float ea = pa[i] + dt * reference_rhs(
                 lap, pa[i], s_other_host(S[i], pa[i]), gx, gy, gam_a,
                 bulk * gam_a, volC, rep, vx, vy);
             if (!same_bits(na[i], ea) && ++checked_a == 1)
-                expect(false, "cell a must advance with the legacy default "
+                expect(false, "cell a must advance with the reference default "
                               "path");
             stencil(pb, &lap, &gx, &gy);
             const float eb = pb[i] + dt * (mrel_b * (
