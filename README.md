@@ -21,7 +21,7 @@ confined between two walls (right). Colours distinguish individual cells.
 | `cell_gh200_3d` | Periodic 3D, substrate, or confinement between two walls | One GPU |
 | `cell_gh200_3d_two_gpu` | Substrate or confinement between two walls | Two matching GPUs with CUDA peer access |
 
-The [3D model guide](docs/three-dimensional-solver.md) describes these
+The [3D guide](docs/three-dimensional-solver.md) describes these
 geometries and their assumptions. The substrate has no adhesion, and the
 confining walls are purely steric.
 
@@ -135,7 +135,7 @@ contour/contact tests and their Python dependencies.
 Further documentation covers:
 
 - [Model, build variants, initialization and restart](docs/solver-reference.md).
-- [Three-dimensional equations, geometries and storage](docs/three-dimensional-solver.md).
+- [3D geometries and examples](docs/three-dimensional-solver.md).
 - [Starting 3D simulations from relaxed 2D positions](docs/relaxed-2d-slab-initialization.md).
 - [Reconstructing 3D contours and analyzing contact exchanges](docs/contact_exchange_3d.md).
 

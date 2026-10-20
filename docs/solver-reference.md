@@ -19,9 +19,12 @@ translation velocity, polarity or the tumble stream. Coefficient definitions
 are in [`common/model_coefficients.cuh`](../common/model_coefficients.cuh) and
 [`include/params.cuh`](../include/params.cuh).
 
-The [3D model guide](three-dimensional-solver.md) gives the 27-point stencil,
-volume constraint and boundary terms. Periodic cells have full-sphere target
-volume and unrestricted 3D polarity. Substrate cells have hemispherical target
+The [3D guide](three-dimensional-solver.md) gives geometry choices and run
+examples. The 3D solver uses an isotropic 27-point Laplacian, with face, edge,
+corner and centre weights of 14, 3, 1 and -128, divided by 30. Coefficients and
+boundary terms are defined in [`include/pf3d/params.cuh`](../include/pf3d/params.cuh)
+and [`include/pf3d/reference.hpp`](../include/pf3d/reference.hpp). Periodic cells
+have full-sphere target volume and unrestricted 3D polarity. Substrate cells have hemispherical target
 volume, neutral 90-degree contact and planar translation. The hard-wall channel
 contains full-volume cells with unrestricted 3D motion between resolved steric
 walls. These are distinct geometries, not interchangeable boundary settings
@@ -134,7 +137,7 @@ A small channel with contour recording is:
 This is a low-memory software example, not a calibrated experimental setup.
 For two GPUs use `cell_gh200_3d_two_gpu` with
 `--device 0 --peer-device 1 --memory-mode throughput`.
-See [3D geometry and initialization](three-dimensional-solver.md) and
+See [3D examples](three-dimensional-solver.md) and
 [relaxed 2D placement transfer](relaxed-2d-slab-initialization.md) before
 preparing larger runs.
 
