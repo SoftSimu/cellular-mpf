@@ -395,17 +395,27 @@ __device__ __forceinline__ void prefetch_halo(const float* tile, int B,
 // visible to the integrity checks. Each thread scans only words it staged and
 // waited on; the final collective publishes all copies before stencil reads.
 __device__ __forceinline__ bool halo_any_nonzero(const float* shared_buf) {
-    bool any = false;
     // Match prefetch_halo's float4-interior and scalar-ghost thread ownership.
     constexpr int rows = kHaloY * kHaloZ, vectors_per_row = kBrickX / 4;
-    for (int q = static_cast<int>(threadIdx.x); q < rows * vectors_per_row;
+    static_assert(rows * vectors_per_row >= kThreads3D);
+    const auto nonzero = [](float4 value) {
+        return (value.x != 0.0f) | (value.y != 0.0f)
+             | (value.z != 0.0f) | (value.w != 0.0f);
+    };
+    const int first = static_cast<int>(threadIdx.x);
+    const int first_row = first / vectors_per_row;
+    const int first_hx = 1 + 4 * (first % vectors_per_row);
+    bool any = nonzero(*reinterpret_cast<const float4*>(
+        shared_buf + first_row * kHaloRowStride + first_hx));
+    // A nonzero witness is enough; scan the rest only to prove an empty halo.
+    if (__syncthreads_or(any ? 1 : 0) != 0) return true;
+    for (int q = first + kThreads3D; q < rows * vectors_per_row;
          q += kThreads3D) {
         const int row = q / vectors_per_row, hx = 1 + 4 * (q % vectors_per_row);
         const float4 v = *reinterpret_cast<const float4*>(
             shared_buf + row * kHaloRowStride + hx);
         // Floating comparisons treat signed zero as zero and keep NaN visible.
-        any = any || ((v.x != 0.0f) | (v.y != 0.0f)
-                    | (v.z != 0.0f) | (v.w != 0.0f));
+        any = any || nonzero(v);
     }
     for (int q = static_cast<int>(threadIdx.x); q < 2 * rows; q += kThreads3D) {
         const int row = q / 2, hx = (q % 2) * (kHaloX - 1);
@@ -1008,11 +1018,18 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             const int z0 = tz * kBrickZ;
 
             [[maybe_unused]] PendingScatter3D pending_scatter;
+            [[maybe_unused]] const std::size_t aggregate_plane_words =
+                static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
             const auto update_voxel = [&](int ix, int iy, int iz,
                                           StencilValues3D values,
-                                          std::uint32_t prefetched = 0u) {
+                                          std::uint32_t prefetched = 0u,
+                                          std::size_t aggregate_row = 0) {
                 const int x = x0 + ix, y = y0 + iy, z = z0 + iz;
-                if (x >= B || y >= B || z >= B) return;
+                if constexpr (CollectMoments) {
+                    if (x >= B || y >= B || z >= B) return;
+                } else {
+                    if (z >= B) return;
+                }
                 int wz = 0;
                 const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
                     : aggregate_z(args.layout, origin_z, z, &wz);
@@ -1039,11 +1056,17 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     return;
                 }
 
-                const int wx = wrap_offset(origin_x, x, args.layout.nx);
-                const int wy = wrap_offset(origin_y, y, args.layout.ny);
+                std::size_t aggregate_index;
+                if constexpr (CollectMoments)
+                    aggregate_index = s_index(args.layout,
+                        wrap_offset(origin_x, x, args.layout.nx),
+                        wrap_offset(origin_y, y, args.layout.ny), wz);
+                else
+                    aggregate_index = aggregate_row
+                        + static_cast<std::size_t>(wz) * aggregate_plane_words;
                 const std::uint32_t aggregate =
                     !CollectMoments ? prefetched :
-                    args.S_in[s_index(args.layout, wx, wy, wz)];
+                    args.S_in[aggregate_index];
                 float other = other_field(aggregate, centre, state,
                                           args.global_flags);
                 if constexpr (WallCoupling)
@@ -1085,11 +1108,11 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     // sharding changes only which CTA issues each atomic.
                     if constexpr (!CollectMoments)
                         pending_scatter.add(args.S_out,
-                            s_index(args.layout, wx, wy, wz), next,
+                            aggregate_index, next,
                             state, args.global_flags);
                     else
                         scatter_value(args.S_out,
-                                      s_index(args.layout, wx, wy, wz), next,
+                                      aggregate_index, next,
                                       state, args.global_flags);
                 }
 
@@ -1127,6 +1150,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 for (int iy = static_cast<int>(threadIdx.x) / kBrickX;
                      iy < kBrickY; iy += kThreads3D / kBrickX) {
                     const int x = x0 + ix, y = y0 + iy;
+                    if (x >= B || y >= B) continue;
                     const std::size_t row = s_index(args.layout,
                         wrap_offset(origin_x, x, args.layout.nx),
                         wrap_offset(origin_y, y, args.layout.ny), 0);
@@ -1137,7 +1161,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                         const int z = z0 + iz;
                         const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
                             : aggregate_z(args.layout, origin_z, z, &wz);
-                        return x < B && y < B && z < B && mapped
+                        return z < B && mapped
                             ? load_aggregate_ahead(args.S_in + row
                                 + static_cast<std::size_t>(wz) * plane_words)
                             : 0u;
@@ -1154,7 +1178,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                             ? prefetch(iz + distance) : 0u;
                         const auto values = advance_stencil_plane(
                             shared_phi, ix, iy, iz, below, middle);
-                        update_voxel(ix, iy, iz, values, current_aggregate);
+                        update_voxel(ix, iy, iz, values, current_aggregate, row);
                         current_aggregate = queued_aggregate;
                         queued_aggregate = next_aggregate;
                     };
@@ -1793,44 +1817,44 @@ void k_measure_cell_shards_impl(MeasureArgs3D args) {
             const int x0 = bx * kBrickX;
             const int y0 = by * kBrickY;
             const int z0 = bz * kBrickZ;
-            const auto prefetch = [&](int q) {
-                if (q >= kBrickVoxels) return 0u;
-                const int x = x0 + q % kBrickX;
-                const int y = y0 + (q / kBrickX) % kBrickY;
-                const int z = z0 + q / (kBrickX * kBrickY);
+            constexpr int row_stride = kThreads3D / kBrickX;
+            static_assert(kBrickY == 2 * row_stride,
+                          "the paired walk must preserve each thread's reduction order");
+            const int ix = static_cast<int>(threadIdx.x) % kBrickX;
+            const int iy0 = static_cast<int>(threadIdx.x) / kBrickX;
+            const int iy1 = iy0 + row_stride;
+            const int x = x0 + ix;
+            const int y_first = y0 + iy0, y_second = y0 + iy1;
+            const bool first_valid = x < B && y_first < B;
+            const bool second_valid = x < B && y_second < B;
+            const int wx = wrap_offset(ox, x, args.layout.nx);
+            const std::size_t first_row = s_index(args.layout, wx,
+                wrap_offset(oy, y_first, args.layout.ny), 0);
+            const std::size_t second_row = s_index(args.layout, wx,
+                wrap_offset(oy, y_second, args.layout.ny), 0);
+            const std::size_t plane_words =
+                static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
+            const auto world_plane = [&](int iz) {
+                const int z = z0 + iz;
                 int wz = 0;
                 const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
                     : aggregate_z(args.layout, origin_z, z, &wz);
-                return x < B && y < B && z < B && mapped
-                    ? load_aggregate_ahead(args.S + s_index(args.layout,
-                        wrap_offset(ox, x, args.layout.nx),
-                        wrap_offset(oy, y, args.layout.ny), wz))
-                    : 0u;
+                return iz < kBrickZ && z < B && mapped ? wz : -1;
             };
-            std::uint32_t current_aggregate = prefetch(threadIdx.x);
-            std::uint32_t queued_aggregate = prefetch(threadIdx.x + kThreads3D);
-            for (int q = static_cast<int>(threadIdx.x); q < kBrickVoxels;
-                 q += kThreads3D) {
-                const std::uint32_t next_aggregate = prefetch(
-                    q + 2 * kThreads3D);
-                const std::uint32_t prefetched = current_aggregate;
-                current_aggregate = queued_aggregate;
-                queued_aggregate = next_aggregate;
-                const int ix = q % kBrickX;
-                const int iy = (q / kBrickX) % kBrickY;
-                const int iz = q / (kBrickX * kBrickY);
-                const int x = x0 + ix, y = y0 + iy, z = z0 + iz;
-                if (x >= B || y >= B || z >= B) continue;
-                int wz = 0;
-                const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
-                    : aggregate_z(args.layout, origin_z, z, &wz);
-                if (!mapped)
-                    continue;
+            const auto prefetch_row = [&](std::size_t row, bool valid, int wz) {
+                return valid && wz >= 0
+                    ? load_aggregate_ahead(args.S + row
+                        + static_cast<std::size_t>(wz) * plane_words) : 0u;
+            };
+            const auto accumulate = [&](int iy, int y, bool valid, int iz,
+                                         int wz, std::uint32_t prefetched) {
+                if (!valid || wz < 0) return;
+                const int z = z0 + iz;
                 const float centre = shared_phi[halo_index(ix + 1, iy + 1,
                                                            iz + 1)];
                 if (!isfinite(centre)) {
                     raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
-                    continue;
+                    return;
                 }
                 float gx, gy, gz;
                 gradient3(shared_phi, ix + 1, iy + 1, iz + 1,
@@ -1868,6 +1892,24 @@ void k_measure_cell_shards_impl(MeasureArgs3D args) {
                     local.lo_z = min(local.lo_z, z);
                     local.hi_z = max(local.hi_z, z);
                 }
+            };
+            // q=threadIdx.x+k*256 visits the two rows of each z plane in this
+            // order. Keeping that order preserves the stored moment grouping.
+            int wz = world_plane(0);
+            std::uint32_t first_aggregate = prefetch_row(first_row, first_valid, wz);
+            std::uint32_t second_aggregate = prefetch_row(second_row, second_valid, wz);
+#pragma unroll 1
+            for (int iz = 0; iz < kBrickZ; ++iz) {
+                const int next_wz = world_plane(iz + 1);
+                const std::uint32_t next_first =
+                    prefetch_row(first_row, first_valid, next_wz);
+                accumulate(iy0, y_first, first_valid, iz, wz, first_aggregate);
+                const std::uint32_t next_second =
+                    prefetch_row(second_row, second_valid, next_wz);
+                accumulate(iy1, y_second, second_valid, iz, wz, second_aggregate);
+                first_aggregate = next_first;
+                second_aggregate = next_second;
+                wz = next_wz;
             }
         }
         __syncthreads();
