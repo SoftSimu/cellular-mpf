@@ -15,6 +15,12 @@ It contains the 2D monolayer solver and a 3D extension:
 | `cell_gh200_3d` | Periodic 3D, substrate slab, or two-hard-wall channel | One GPU |
 | `cell_gh200_3d_two_gpu` | Substrate slab or two-hard-wall channel | Two matching, peer-connected GPUs |
 
+![A tagged cell in an all-normal monolayer, left, and a monolayer containing one soft cell, right.](docs/media/single-soft-cell.png)
+
+A single soft cell (right) and its all-normal reference (left), with 400 cells
+in each simulation. The tagged cell is teal, with its recent trajectory shown
+in white. [Watch the movie](docs/media/single-soft-cell.mp4).
+
 ## Build
 
 You need CUDA 12+, CMake 3.24+, and a C++17 compiler. Python 3.10+ runs the
@@ -98,6 +104,15 @@ To continue a 2D simulation, pass `-c path/to/checkpoint.bin` and a later
 `--t-end`; 3D uses `checkpoint.pf3d`. Checkpoints retain stable cell IDs,
 polarity and the random-stream state needed for continuation. See
 [restart settings](docs/solver-reference.md#outputs-and-restart-behavior).
+
+## Simulation movies
+
+![Simulation preview comparing mixtures with 5% soft cells, left, and 50%, right. Normal cells are red and soft cells are teal.](docs/media/binary-mixtures.gif)
+
+Mixtures with 5% and 50% soft cells. Each simulation contains 400 cells and
+shows 50 persistence times of active motion.
+[Watch the 1080p movie](docs/media/binary-mixtures.mp4).
+The [movie notes](docs/media/README.md) describe the parameters and colours.
 
 ## Tests and documentation
 

@@ -236,7 +236,8 @@ install(FILES
   tools/pf3d_checkpoint_header.py tools/pf3d_surface.py tools/pf3d_contact.py
   tools/pf3d_exchange.py tools/pf3d_event_catalog.py DESTINATION bin)
 install(FILES README.md CITATION.cff LICENSE.txt COPYING DESTINATION share/doc/phase_field_gh200)
-install(DIRECTORY docs/ DESTINATION share/doc/phase_field_gh200/docs FILES_MATCHING PATTERN "*.md")
+install(DIRECTORY docs/ DESTINATION share/doc/phase_field_gh200/docs
+  FILES_MATCHING PATTERN "*.md" PATTERN "*.png" PATTERN "*.gif" PATTERN "*.mp4")
 install(DIRECTORY examples/ DESTINATION share/doc/phase_field_gh200/examples
   FILES_MATCHING PATTERN "*.py" PATTERN "*.args" PATTERN "__pycache__" EXCLUDE)
 install(FILES tools/requirements-visualization.txt tools/requirements-contacts.txt
