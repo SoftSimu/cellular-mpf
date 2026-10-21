@@ -2187,6 +2187,7 @@ bool Sim3D::verify(double* max_relative_volume_error,
 
 bool Sim3D::run() {
     const std::uint64_t target = static_cast<std::uint64_t>(params_.total_steps());
+    std::uint64_t last_rolling_checkpoint = std::numeric_limits<std::uint64_t>::max();
     if (steps_done_ > target) {
         std::fprintf(stderr, "[3d] checkpoint step exceeds requested t_end\n");
         return false;
@@ -2288,6 +2289,7 @@ bool Sim3D::run() {
             const std::filesystem::path rolling =
                 std::filesystem::path(options_.checkpoint_dir) / "checkpoint.pf3d";
             if (!checkpoint_at_current_state(rolling.string())) return false;
+            last_rolling_checkpoint = steps_done_;
             advance_schedule(&next_checkpoint,
                 static_cast<std::uint64_t>(options_.checkpoint_interval));
         }
@@ -2306,7 +2308,9 @@ bool Sim3D::run() {
     if (!synchronize_and_check("final synchronization")) return false;
     if (trajectory_file_ && last_trajectory_step_ != steps_done_ &&
         !append_trajectory()) return false;
-    if (options_.final_checkpoint && !options_.checkpoint_dir.empty()) {
+    // A rolling checkpoint written at this same step is already durable.
+    if (options_.final_checkpoint && !options_.checkpoint_dir.empty() &&
+        last_rolling_checkpoint != steps_done_) {
         const std::filesystem::path rolling =
             std::filesystem::path(options_.checkpoint_dir) / "checkpoint.pf3d";
         if (!checkpoint_at_current_state(rolling.string())) return false;

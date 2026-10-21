@@ -102,6 +102,32 @@ inline std::uint64_t crc64_ecma_update(std::uint64_t crc, const void* data,
                                        std::size_t bytes) {
     const auto* input = static_cast<const std::uint8_t*>(data);
     const auto& table = crc64_ecma_table();
+    // Each slice advances one byte's contribution through the remaining bytes
+    // of an eight-byte block, without changing the streamed CRC convention.
+    static const auto slices = [] {
+        std::array<std::array<std::uint64_t, 256>, 8> values{};
+        values[0] = crc64_ecma_table();
+        for (std::size_t slice = 1; slice < values.size(); ++slice) {
+            for (std::size_t i = 0; i < 256; ++i) {
+                const auto previous = values[slice - 1][i];
+                values[slice][i] = values[0][previous >> 56] ^ (previous << 8);
+            }
+        }
+        return values;
+    }();
+    while (bytes >= 8) {
+        // Byte assembly permits unaligned input and is independent of host endian.
+        crc ^= (std::uint64_t{input[0]} << 56) | (std::uint64_t{input[1]} << 48)
+             | (std::uint64_t{input[2]} << 40) | (std::uint64_t{input[3]} << 32)
+             | (std::uint64_t{input[4]} << 24) | (std::uint64_t{input[5]} << 16)
+             | (std::uint64_t{input[6]} << 8) | input[7];
+        crc = slices[7][crc >> 56] ^ slices[6][(crc >> 48) & 255]
+            ^ slices[5][(crc >> 40) & 255] ^ slices[4][(crc >> 32) & 255]
+            ^ slices[3][(crc >> 24) & 255] ^ slices[2][(crc >> 16) & 255]
+            ^ slices[1][(crc >> 8) & 255] ^ slices[0][crc & 255];
+        input += 8;
+        bytes -= 8;
+    }
     for (std::size_t i = 0; i < bytes; ++i) {
         const std::uint8_t index = static_cast<std::uint8_t>(
             (crc >> 56) ^ static_cast<std::uint64_t>(input[i]));

@@ -10,18 +10,35 @@ namespace pf3d::surface {
 // are zero-extended to uint64_t; this is a corruption check, not authentication.
 inline std::uint32_t crc32_update(std::uint32_t previous, const void* data, std::size_t size) {
     static const auto table = [] {
-        std::array<std::uint32_t, 256> result{};
+        std::array<std::array<std::uint32_t, 256>, 8> result{};
         for (unsigned i = 0; i < 256; ++i) {
             auto value = i;
             for (int bit = 0; bit < 8; ++bit)
                 value = (value >> 1) ^ ((value & 1u) ? 0xedb88320u : 0u);
-            result[i] = value;
+            result[0][i] = value;
+        }
+        for (std::size_t slice = 1; slice < result.size(); ++slice) {
+            for (std::size_t i = 0; i < 256; ++i) {
+                const auto value = result[slice - 1][i];
+                result[slice][i] = result[0][value & 255u] ^ (value >> 8);
+            }
         }
         return result;
     }();
     auto crc = ~previous;
     const auto* bytes = static_cast<const unsigned char*>(data);
-    for (std::size_t q = 0; q < size; ++q) crc = table[(crc ^ bytes[q]) & 255u] ^ (crc >> 8);
+    // Eight independent table lookups replace the serial byte-wise dependency.
+    while (size >= 8) {
+        crc ^= std::uint32_t{bytes[0]} | (std::uint32_t{bytes[1]} << 8)
+             | (std::uint32_t{bytes[2]} << 16) | (std::uint32_t{bytes[3]} << 24);
+        crc = table[7][crc & 255u] ^ table[6][(crc >> 8) & 255u]
+            ^ table[5][(crc >> 16) & 255u] ^ table[4][crc >> 24]
+            ^ table[3][bytes[4]] ^ table[2][bytes[5]]
+            ^ table[1][bytes[6]] ^ table[0][bytes[7]];
+        bytes += 8;
+        size -= 8;
+    }
+    for (std::size_t q = 0; q < size; ++q) crc = table[0][(crc ^ bytes[q]) & 255u] ^ (crc >> 8);
     return ~crc;
 }
 
