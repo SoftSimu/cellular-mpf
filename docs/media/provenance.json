@@ -100,6 +100,83 @@
       "sha256": "33bb0055bc6d79c15c2bc9cecd56baf1b9d78ddf2e56475cc9a65624ec9fea83",
       "source_movie_frame": 220,
       "time_tau": 25
+    },
+    {
+      "file": "kinetic-control.mp4",
+      "source": "analysis/readme_movie_20261021/render_preview.py",
+      "sha256": "44f7b5b55538ce371612326c3aad00fb7ea99bad7c513fb167b200856976988c",
+      "bytes": 9151876,
+      "N": 400,
+      "xi": 375,
+      "gamma": 1,
+      "fraction": 0.3,
+      "mobility_reference": 0.5,
+      "mobility_selected_kinetic": 0.175,
+      "source_campaign": "xi_robustness_20260927",
+      "seed": "a",
+      "source_commit": "e088c0accb3a9cd2fad755cb37d3959a9b22c93b",
+      "time_range_tau": [
+        10,
+        18
+      ],
+      "source_interval_tau": 0.01,
+      "interval_tau": 0.04,
+      "fps": 25,
+      "frames": 201,
+      "duration_seconds": 8.04,
+      "playback_tau_per_second": 1,
+      "perimeters_checked": 160800,
+      "max_perimeter_difference": 7.958078640513122e-13,
+      "contour_components_per_condition_per_frame": 400,
+      "temporal_interpolation": false,
+      "geometry_smoothing": false,
+      "full_decode": "PASS"
+    },
+    {
+      "file": "kinetic-control.gif",
+      "source": "kinetic-control.mp4",
+      "sha256": "d275902f7c9e1f491b39a636130fc769b60054ba0b4e0929904f3424eafbef93",
+      "bytes": 6621263,
+      "size": [
+        800,
+        450
+      ],
+      "fps": 25,
+      "frames": 201,
+      "unique_frames": 201,
+      "frame_duration_ms": 40,
+      "duration_seconds": 8.04,
+      "time_range_tau": [
+        10,
+        18
+      ],
+      "interval_tau": 0.04,
+      "playback_tau_per_second": 1,
+      "temporal_interpolation": false,
+      "palette_colours": 22,
+      "palette": "Fixed rendering colours and antialias shades",
+      "dithering": false
+    },
+    {
+      "file": "kinetic-control-full.mp4",
+      "source": "analysis\\supplementary_movies\\consistent\\Supplementary_Movie_3.mp4",
+      "sha256": "6128dcbc7e26f1e02aa6a8ff91aa3421bdcf37c38ae3a799ec340eccb75bc607",
+      "bytes": 29349147,
+      "time_range_tau": [
+        0,
+        50
+      ],
+      "interval_tau": 0.125,
+      "actual_intervals_tau": [
+        0.12,
+        0.13
+      ],
+      "fps": 20,
+      "duration_seconds": 22.05,
+      "playback_tau_per_second": 2.5,
+      "full_decode": "PASS",
+      "perimeters_checked": 320800,
+      "max_perimeter_difference": 9.094947017729282e-13
     }
   ],
   "simulation_data_modified": false,
