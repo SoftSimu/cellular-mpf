@@ -104,8 +104,8 @@
     {
       "file": "kinetic-control.mp4",
       "source": "analysis/readme_movie_20261021/render_preview.py",
-      "sha256": "44f7b5b55538ce371612326c3aad00fb7ea99bad7c513fb167b200856976988c",
-      "bytes": 9151876,
+      "sha256": "0be1a405bfa96a23cbc16b8ced5e40d2443ea5ca7b3caa76a29cf8db3a97800e",
+      "bytes": 10914451,
       "N": 400,
       "xi": 375,
       "gamma": 1,
@@ -130,13 +130,21 @@
       "contour_components_per_condition_per_frame": 400,
       "temporal_interpolation": false,
       "geometry_smoothing": false,
-      "full_decode": "PASS"
+      "full_decode": "PASS",
+      "labels": [
+        "Reference",
+        "Slower shape relaxation",
+        "Purple cells relax more slowly on the right"
+      ],
+      "parameter_labels": false,
+      "clock": false,
+      "scale_bars": false
     },
     {
       "file": "kinetic-control.gif",
       "source": "kinetic-control.mp4",
-      "sha256": "d275902f7c9e1f491b39a636130fc769b60054ba0b4e0929904f3424eafbef93",
-      "bytes": 6621263,
+      "sha256": "1ab36910e0ad356fc6add3ac5844a6d26a08faa2351f208fed32a092b382c012",
+      "bytes": 8747363,
       "size": [
         800,
         450
@@ -155,7 +163,15 @@
       "temporal_interpolation": false,
       "palette_colours": 22,
       "palette": "Fixed rendering colours and antialias shades",
-      "dithering": false
+      "dithering": false,
+      "labels": [
+        "Reference",
+        "Slower shape relaxation",
+        "Purple cells relax more slowly on the right"
+      ],
+      "parameter_labels": false,
+      "clock": false,
+      "scale_bars": false
     },
     {
       "file": "kinetic-control-full.mp4",

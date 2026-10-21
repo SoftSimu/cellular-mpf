@@ -40,7 +40,7 @@ the right; the other cells retain M = 0.5.
 The [HD preview](kinetic-control.mp4) shows active ages 10–18τ at 25 fps,
 using original frames spaced by 0.04τ. The [full comparison](kinetic-control-full.mp4)
 shows 50τ at 20 fps. The preview plays at 1τ per second; the full movie plays
-at 2.5τ per second. Fonts, colours and layout match the other movies.
+at 2.5τ per second.
 [Recording and rendering details](provenance.json).
 
 ## Soft-cell examples

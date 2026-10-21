@@ -121,12 +121,11 @@ with a detail from the same saved state on the right.
 
 ![A reference monolayer on the left and slower passive relaxation in 30% of cells on the right. Selected cells are purple in both panels.](docs/media/kinetic-control.gif)
 
-Slower shape relaxation in 30% of the cells (purple, right), alongside an
-all-normal reference (left). All cells have the same interfacial coefficient.
-[Watch in HD](docs/media/kinetic-control.mp4).
+[Watch in HD](docs/media/kinetic-control.mp4) ·
+[Movie details](docs/media/README.md#kinetic-comparison).
+
 The [single-cell movie](docs/media/single-soft-cell.mp4) follows one soft cell
 alongside its all-normal reference.
-The [movie notes](docs/media/README.md) describe the parameters and colours.
 
 ## Tests and documentation
 
