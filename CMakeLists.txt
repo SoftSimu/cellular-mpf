@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
+  set(CMAKE_CUDA_ARCHITECTURES 90 CACHE STRING "CUDA architectures")
+endif()
 project(phase_field_gh200 VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -12,9 +15,6 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_SEPARABLE_COMPILATION OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 90)
-endif()
 
 option(PF_BUILD_3D "Build the three-dimensional solver" ON)
 option(PF_BUILD_TOOLS "Build initializer and boundary-export tools" ON)
@@ -25,6 +25,22 @@ option(PF_ENABLE_GPU_TESTS "Register smoke tests requiring a CUDA GPU" OFF)
 option(PF_ENABLE_CONTACT_TESTS "Register optional Python contact/contour tests" OFF)
 if(PF_BUILD_TWO_GPU_SUBSTRATE AND NOT PF_BUILD_3D)
   message(FATAL_ERROR "PF_BUILD_TWO_GPU_SUBSTRATE requires PF_BUILD_3D")
+endif()
+if(PF_BUILD_3D)
+  if(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+    message(FATAL_ERROR "The 3D CUDA implementation requires NVIDIA nvcc")
+  endif()
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.5)
+    message(FATAL_ERROR "3D tensor-map loading requires CUDA 12.5 or newer")
+  endif()
+  foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    if(NOT arch MATCHES "^([0-9]+)([af])?(-(real|virtual))?$")
+      message(FATAL_ERROR "3D requires explicit CUDA architectures >= 90; use -DCMAKE_CUDA_ARCHITECTURES=90")
+    endif()
+    if(CMAKE_MATCH_1 LESS 90)
+      message(FATAL_ERROR "3D bulk-copy instructions require CUDA architecture >= 90")
+    endif()
+  endforeach()
 endif()
 
 # These options specify the validated arithmetic; do not add fast-math.
@@ -241,7 +257,8 @@ install(FILES
   tools/pf3d_exchange.py tools/pf3d_event_catalog.py DESTINATION bin)
 install(FILES README.md CITATION.cff LICENSE.txt COPYING DESTINATION share/doc/phase_field_gh200)
 install(DIRECTORY docs/ DESTINATION share/doc/phase_field_gh200/docs
-  FILES_MATCHING PATTERN "*.md" PATTERN "*.png" PATTERN "*.gif" PATTERN "*.mp4")
+  FILES_MATCHING PATTERN "*.md" PATTERN "*.png" PATTERN "*.gif" PATTERN "*.mp4"
+  PATTERN "*.json")
 install(DIRECTORY examples/ DESTINATION share/doc/phase_field_gh200/examples
   FILES_MATCHING PATTERN "*.py" PATTERN "*.args" PATTERN "__pycache__" EXCLUDE)
 install(FILES tools/requirements-visualization.txt tools/requirements-contacts.txt

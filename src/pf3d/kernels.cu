@@ -3007,6 +3007,7 @@ bool launch_check_promoted_crops(
 template <bool WallCoupling, bool ComputeSurface>
 void enqueue_base_measurement(const MeasureArgs3D& args, int count,
                               const CUtensorMap& tensor_map, cudaStream_t stream) {
+    // Specializing the common 160-voxel brick folds integer tile indexing.
     if (args.B == 160)
         k_measure_cell_shards_impl<WallCoupling, ComputeSurface, 160>
             <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(args, tensor_map);

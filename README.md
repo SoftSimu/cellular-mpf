@@ -41,8 +41,10 @@ cmake --build build --config Release --parallel 8
 
 Set `-DPF_BUILD_3D=ON` to include the single-GPU 3D solver. Add
 `-DPF_BUILD_TWO_GPU_SUBSTRATE=ON` to build the two-GPU executable.
-See the [build notes](docs/solver-reference.md#requirements) for other GPU
-architectures, Windows builds, diagnostic options and installation.
+The 3D solver requires CUDA 12.5+ (`nvcc`) and Hopper-class instructions
+(`sm_90` or newer); the current optimized path is tested on GH200. See the
+[build notes](docs/solver-reference.md#requirements) for tested configurations,
+Windows builds, diagnostic options and installation.
 
 ## Run the example
 

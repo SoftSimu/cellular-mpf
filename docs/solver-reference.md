@@ -41,16 +41,21 @@ it does not use MPI or domain-decomposed cell fields.
 
 - CMake 3.24+, a C++17 compiler and CUDA 12+.
 - NVIDIA hardware supporting the chosen CUDA architecture; `sm_90` is the default.
+- The 3D bulk-copy loader requires NVIDIA nvcc 12.5+ and explicit architecture targets
+  of 90 or newer. H100/GH200 are tested; newer architectures are not certified.
 - Python 3.10+ for examples, readers and the small CPU-test configuration.
 - Python 3.11+ and the pinned analysis dependencies for contour/contact tests
   or full-field visualization.
 
-Production builds have been exercised on GH200 with NVHPC 26.3/CUDA 13.1.
-Single-GPU checks also passed on H100 with GCC 12.3/CUDA 13.2. Windows builds
-with MSVC 19.44/CUDA 12.5.82 passed the retained CPU and postprocessing tests;
-they do not establish GPU performance. Other toolchains and architectures
-need their own checks. Two-device execution requires matching GPUs with CUDA
-peer access; the tested configuration is two GH200s on one node.
+The current 3D bulk-copy path has been exercised on GH200 with NVHPC 26.3/CUDA
+13.1. A clean Windows build with MSVC 19.44/CUDA 12.5.82 passed all ten retained
+CPU and postprocessing tests; this does not establish GPU performance.
+Earlier single-GPU checks on H100 with GCC 12.3/CUDA 13.2 predate the bulk-copy
+path. Two-device execution requires matching GPUs with CUDA peer access;
+the tested configuration is two GH200s on one node.
+
+On Windows, put the matching toolkit's `bin` directory first on `PATH`; an
+older `cudart64_12.dll` can lack the entry points needed by the 3D loader.
 
 ## Build
 

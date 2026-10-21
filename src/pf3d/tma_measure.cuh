@@ -1,5 +1,7 @@
 #pragma once
 
+// Private implementation for kernels.cu, included after pf3d/kernels.cuh
+// supplies the measurement arguments and shared-halo layout.
 #include <cudaTypedefs.h>
 #include <vector>
 
