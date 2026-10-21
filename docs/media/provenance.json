@@ -203,10 +203,19 @@
     "cells": 126025,
     "geometry": "periodic 2D",
     "side": 32500,
-    "step": 100000,
-    "time_tau": 0.1,
+    "step": 200000,
+    "passive_duration_tau": 0.1,
+    "active_duration_tau": 0.1,
+    "time_total_tau": 0.2,
+    "initialization": "Palmieri sequential random centres with periodic minimum separation R",
+    "initial_centres_sha256": "e459c479ce019f489e8037a755319dd3ffc4ad43eaba21fda28be2387064b713",
     "seed": 20261020,
     "polarity_seed": 20261020,
+    "cluster": "roihu",
+    "gpu_type": "GH200",
+    "gpu_count": 1,
+    "slurm_job_id": 2429510,
+    "preparation_and_run_wall_seconds": 9616.441645946994,
     "parameters": {
       "radius": 49,
       "rho": 0.9,
@@ -220,35 +229,24 @@
       "mu": 1,
       "xi": 1500
     },
-    "initialization": "Built-in grid and jitter, all gamma=1, no passive aging",
-    "gpu": {
-      "name": "NVIDIA GH200 120GB",
-      "free_bytes": 101412831232,
-      "total_bytes": 102005473280,
-      "pci_bus": "0019:01:00.0",
-      "sms": 132
-    },
-    "maximum_sampled_device_memory_mib": 93539.0,
-    "memory_sampling_interval_seconds": 10,
-    "simulation_wall_seconds": 4113.401573298994,
-    "purpose": "Software-capacity demonstration; separate from manuscript ensembles",
-    "boundary_sha256": "435c70ab9a4bca55fa8fad16b8fc7ab161d73a5f73ba8ff1ee24b610dcfd32c6",
-    "extracted_samples_sha256": "44fcfe6db5fdbf1d3b8b747be6b6d1da8a1d75720a8e43e3fc33abf4035133bf",
-    "initial_and_final_frame_checksums": [
-      7565298618013896705,
-      4098110223789005278
+    "boundary_sha256": "18dd3b961ffc40eecdef3b111f6081f9cdb808bc3e3e353745026df441eb7bd1",
+    "extracted_samples_sha256": "c4f79956bba04171b38e8abf8e9cceedde96282066681036f928438fee539d2b",
+    "active_initial_and_final_checksums": [
+      1472657584991276022,
+      14960100706569186968
     ],
-    "integrity_checks": "PASS: simulator self-test and fatal guards, scheduled volume/support checks, both boundary checksums and completion footer, independent strict Rust reader, all final cell perimeters.",
     "image_checks": {
       "status": "PASS",
       "cells": 126025,
       "side": 32500,
-      "step": 100000,
-      "time_tau": 0.1,
+      "step": 200000,
+      "time_total_tau": 0.2,
+      "active_time_tau": 0.1,
       "contour_components": 126025,
       "perimeters_checked": 126025,
-      "max_perimeter_difference": 7.958078640513122e-13,
-      "detector_rule_fallback_cells": 11,
+      "max_perimeter_difference": 8.526512829121202e-13,
+      "detector_rule_fallback_cells": 8,
+      "source_sha256": "c4f79956bba04171b38e8abf8e9cceedde96282066681036f928438fee539d2b",
       "detail_bounds": [
         [
           16950.0,
@@ -260,9 +258,20 @@
         ]
       ],
       "geometry_smoothing": false,
-      "temporal_interpolation": false
+      "temporal_interpolation": false,
+      "images": {
+        "monolayer-large.png": {
+          "sha256": "e2d275eda8a7fee2458107a220f92c78f9615af54a4d3c37620b4d1f253b6143",
+          "bytes": 5728388
+        },
+        "monolayer-large-full.png": {
+          "sha256": "237014700dc368f5effef5f99607954382a33f2df1e2e9e4a396167e1c4cf60b",
+          "bytes": 39583677
+        }
+      }
     },
-    "sha256": "9b2073bede5e93abfde812810550e65e2c7ee5e2612399072915998e8a2ee171"
+    "purpose": "README illustration; separate from the manuscript ensembles",
+    "sha256": "237014700dc368f5effef5f99607954382a33f2df1e2e9e4a396167e1c4cf60b"
   },
   "monolayer-large.png": {
     "source": "monolayer-large-full.png",
@@ -276,6 +285,6 @@
         16200.0
       ]
     ],
-    "sha256": "7fd6965ae5c21dc01d01c8699825387601896ef1a6e320af13817dc02ee99c68"
+    "sha256": "e2d275eda8a7fee2458107a220f92c78f9615af54a4d3c37620b4d1f253b6143"
   }
 }

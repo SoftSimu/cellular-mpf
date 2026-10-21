@@ -17,17 +17,15 @@ The [source and rendering record](provenance.json) identifies the saved states.
 
 ## Large monolayer
 
-The [large-system image](monolayer-large.png) shows 126,025 cells after
-0.1 persistence times on one GH200 GPU. All cells have gamma = 1,
-radius 49 and passive relaxation mobility 0.5, at nominal area fraction 0.90.
-The run starts from the built-in grid-and-jitter placement, without passive
-aging. The complete periodic box and its marked detail use the same final
-recorded boundaries. Colours are assigned by cell identity.
+The [large-system image](monolayer-large.png) shows 126,025 cells on one GH200.
+Initial centres are placed randomly with a minimum periodic separation of one
+cell radius. Passive relaxation lasts 0.1 persistence times, followed by
+0.1 persistence times of active motion. All cells have gamma = 1 and mobility 0.5.
 
-The [full-resolution image](monolayer-large-full.png) contains the whole box.
-The [run record](provenance.json) gives the source version, seeds, timing,
-memory use and checks. This is a software-capacity demonstration, separate
-from the replicate ensembles used for the paper.
+The [full-resolution image](monolayer-large-full.png) and marked detail show
+the same final recorded boundaries. Colours distinguish cell identities.
+The [run record](provenance.json) gives parameters and checks. This demonstration
+is separate from the replicate ensembles used for the paper.
 
 ## Kinetic comparison
 

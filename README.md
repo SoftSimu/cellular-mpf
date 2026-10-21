@@ -108,11 +108,10 @@ the fields, cell identities and propulsion state needed for continuation. See
 
 ## Large monolayer
 
-A capability run with **126,025 cells on one GH200 GPU**, evolved for
-0.1 polarity-persistence times. The full periodic domain is on the left,
-with a detail from the same saved state on the right.
+**126,025 cells on one GH200 GPU**, starting from random positions and
+relaxed before active motion.
 
-![A simulated monolayer with 126,025 cells and a detail from the same state.](docs/media/monolayer-large.png)
+![A randomly initialized monolayer with 126,025 cells and a detail from the same state.](docs/media/monolayer-large.png)
 
 [Full-resolution image](docs/media/monolayer-large-full.png) ·
 [Run parameters and checks](docs/media/provenance.json).
