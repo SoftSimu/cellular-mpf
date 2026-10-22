@@ -156,5 +156,10 @@ Software citation details are in [CITATION.cff](CITATION.cff). The underlying
 2D model is described by Palmieri et al., *Scientific Reports* **5**, 11745
 (2015), [doi:10.1038/srep11745](https://doi.org/10.1038/srep11745).
 
+The SymPhas framework is described in:
+
+- S. A. Silber and M. Karttunen, [SymPhas—General Purpose Software for Phase-Field, Phase-Field Crystal, and Reaction-Diffusion Simulations](https://doi.org/10.1002/adts.202100351), *Advanced Theory and Simulations* **5**, 2100351 (2022).
+- S. A. Silber and M. Karttunen, [SymPhas 2.0: Parallel and GPU-accelerated code for phase-field and reaction-diffusion simulations](https://doi.org/10.1016/j.jcp.2026.115363), *Journal of Computational Physics* **568**, 115363 (2027).
+
 The code is distributed under the GNU Lesser General Public License, version 3
 or later. See [LICENSE.txt](LICENSE.txt) and [COPYING](COPYING).
