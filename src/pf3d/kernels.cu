@@ -20,20 +20,11 @@ constexpr int kWarps3D = kThreads3D / 32;
 
 using Reduction3D = MomentPartial3D;
 
-// Skipping the destination clear is safe only when this update covers every
-// stored voxel. Translated or partly clipped bricks still need a full clear.
-__device__ __forceinline__ bool output_is_fully_overwritten(
-    const CellState3D& cell, int B, const CellFieldStorage3D& storage,
-    const SLayout3D& layout) {
-    if (cell.pending_shift_x || cell.pending_shift_y || cell.pending_shift_z)
-        return false;
-    if (!layout.bounded_z()) return true;
-    if (storage.compact(B)) {
-        CellFieldPlaneRange3D retained{};
-        return storage.retained_planes(B, cell.origin_z, &retained)
-            && retained.count == storage.planes(B);
-    }
-    return cell.origin_z >= 0 && cell.origin_z <= layout.nz - B;
+// The fast update writes zeros as well as nonzeros when no recentering is
+// needed. Its clear kernel then owns only the planes outside the domain.
+__device__ __forceinline__ bool unshifted_output(const CellState3D& cell) {
+    return cell.pending_shift_x == 0 && cell.pending_shift_y == 0
+        && cell.pending_shift_z == 0;
 }
 
 __device__ __forceinline__ void write_zero_update_voxel(
@@ -915,8 +906,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         *abort_flag = fatal_flags_present(state, args.global_flags) ? 1 : 0;
         // One shared decision avoids keeping another live register per voxel.
         if constexpr (CompleteOutput)
-            *output_complete = output_is_fully_overwritten(
-                *state, B, args.storage, args.layout) ? 1 : 0;
+            *output_complete = unshifted_output(*state) ? 1 : 0;
         if constexpr (BulkCopies) {
             initialize_tma_barrier(&ready[0]);
             initialize_tma_barrier(&ready[1]);
@@ -1327,17 +1317,29 @@ __global__ void k_clear_selected_base_out(UpdateArgs3D args,
     if (slot >= args.selection.selected_count(args.N)) return;
     const int n = args.selection.cell_index(slot);
     if (cell_is_promoted(args.cells[n], args.B)) return;
-    // Unshifted, fully covered bricks are overwritten even where the result
-    // is zero. Moving bricks retain the original complete clear.
-    if (complete_output && output_is_fully_overwritten(
-            args.cells[n], args.B, args.storage, args.layout)) return;
     const std::size_t words = stored_cell_words(args.B, args.storage);
     float* out = args.phi_out + static_cast<std::size_t>(n) * words;
+    std::size_t written_begin = 0, written_end = 0;
+    if (complete_output && unshifted_output(args.cells[n])) {
+        if (!args.layout.bounded_z()) return;
+        const auto map = BoundedZMap::make(args.cells[n].origin_z, args.B,
+            args.layout.nz, args.layout.hard_wall_channel());
+        if (map.lo < map.hi) {
+            const int offset = args.storage.compact(args.B) ? map.origin : 0;
+            const std::size_t plane = static_cast<std::size_t>(args.B) * args.B;
+            written_begin = static_cast<std::size_t>(offset + map.lo) * plane;
+            written_end = static_cast<std::size_t>(offset + map.hi) * plane;
+        }
+    }
+    // The unshifted fast update overwrites every valid plane, including zeros.
+    // Clear the complement even if the other ping-pong buffer held an older
+    // origin; shifted cells still take the original full-clear path.
+    const std::size_t written_words = written_end - written_begin;
     const std::size_t stride =
         static_cast<std::size_t>(blocks_per_cell) * blockDim.x;
     for (std::size_t q = static_cast<std::size_t>(part) * blockDim.x
-                       + threadIdx.x; q < words; q += stride)
-        out[q] = 0.0f;
+                       + threadIdx.x; q < words - written_words; q += stride)
+        out[q < written_begin ? q : q + written_words] = 0.0f;
 }
 
 __global__ void k_scatter_current(ScatterArgs3D args) {
