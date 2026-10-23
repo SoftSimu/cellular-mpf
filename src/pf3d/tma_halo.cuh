@@ -1,7 +1,7 @@
 #pragma once
 
 // Private implementation for kernels.cu, included after pf3d/kernels.cuh
-// supplies the measurement arguments and shared-halo layout.
+// supplies the field-storage types and shared-halo layout.
 #include <cudaTypedefs.h>
 #include <vector>
 
@@ -17,7 +17,8 @@ constexpr unsigned kTmaHaloBytes = kTmaRowStride * kHaloY * kHaloZ * sizeof(floa
 constexpr unsigned kTmaPipelineBytes = 2 * kTmaBufferWords * sizeof(float);
 static_assert(kTmaBufferWords % 32 == 0);
 
-bool measurement_tensor_map(const MeasureArgs3D& args, CUtensorMap* result) {
+bool field_tensor_map(const float* field, int B, int planes, int N,
+                      CUtensorMap* result) {
     struct Entry {
         const float* field;
         int edge, planes, count;
@@ -26,10 +27,9 @@ bool measurement_tensor_map(const MeasureArgs3D& args, CUtensorMap* result) {
     // Ping-pong allocations keep their descriptors; moving cell origins are
     // supplied as copy coordinates rather than requiring descriptor rebuilds.
     static thread_local std::vector<Entry> entries;
-    const int planes = args.storage.planes(args.B);
     for (const auto& entry : entries) {
-        if (entry.field == args.phi && entry.edge == args.B
-            && entry.planes == planes && entry.count == args.N) {
+        if (entry.field == field && entry.edge == B
+            && entry.planes == planes && entry.count == N) {
             *result = entry.map;
             return true;
         }
@@ -43,16 +43,16 @@ bool measurement_tensor_map(const MeasureArgs3D& args, CUtensorMap* result) {
         return false;
     }
     const auto encode = reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(address);
-    const cuuint64_t edge = args.B;
+    const cuuint64_t edge = B;
     const cuuint64_t sizes[4] = {edge, edge, static_cast<cuuint64_t>(planes),
-                                static_cast<cuuint64_t>(args.N)};
+                                static_cast<cuuint64_t>(N)};
     const cuuint64_t strides[3] = {edge * sizeof(float), edge * edge * sizeof(float),
                                   edge * edge * planes * sizeof(float)};
     const cuuint32_t box[4] = {kTmaRowStride, kHaloY, kHaloZ, 1};
     const cuuint32_t steps[4] = {1, 1, 1, 1};
-    Entry entry{args.phi, args.B, planes, args.N, {}};
+    Entry entry{field, B, planes, N, {}};
     const CUresult status = encode(&entry.map, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4,
-        const_cast<float*>(args.phi), sizes, strides, box, steps,
+        const_cast<float*>(field), sizes, strides, box, steps,
         CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
         CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     if (status != CUDA_SUCCESS) {

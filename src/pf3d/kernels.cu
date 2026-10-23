@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <limits>
 
-#include "tma_measure.cuh"
+#include "tma_halo.cuh"
 
 namespace pf3d {
 namespace {
@@ -213,13 +213,14 @@ __device__ __forceinline__ int halo_index(int x, int y, int z) {
     return (z * kHaloY + y) * RowStride + x;
 }
 
+template <int RowStride = kHaloRowStride>
 __device__ __forceinline__ void stencil27(const float* shared_phi,
                                            int hx, int hy, int hz,
                                            float* laplacian,
                                            float* grad_x,
                                            float* grad_y,
                                            float* grad_z) {
-    const int centre_index = halo_index(hx, hy, hz);
+    const int centre_index = halo_index<RowStride>(hx, hy, hz);
     const float centre = shared_phi[centre_index];
     float weighted = static_cast<float>(kLapCentreW) * centre;
 #pragma unroll
@@ -234,26 +235,27 @@ __device__ __forceinline__ void stencil27(const float* shared_phi,
                                  : distance == 2 ? kLapEdgeW
                                                  : kLapCornerW;
                 weighted += static_cast<float>(weight)
-                          * shared_phi[halo_index(hx + dx, hy + dy, hz + dz)];
+                          * shared_phi[halo_index<RowStride>(hx + dx, hy + dy, hz + dz)];
             }
         }
     }
     *laplacian = weighted * static_cast<float>(1.0 / kLapDenom);
-    *grad_x = 0.5f * (shared_phi[halo_index(hx + 1, hy, hz)]
-                    - shared_phi[halo_index(hx - 1, hy, hz)]);
-    *grad_y = 0.5f * (shared_phi[halo_index(hx, hy + 1, hz)]
-                    - shared_phi[halo_index(hx, hy - 1, hz)]);
-    *grad_z = 0.5f * (shared_phi[halo_index(hx, hy, hz + 1)]
-                    - shared_phi[halo_index(hx, hy, hz - 1)]);
+    *grad_x = 0.5f * (shared_phi[halo_index<RowStride>(hx + 1, hy, hz)]
+                    - shared_phi[halo_index<RowStride>(hx - 1, hy, hz)]);
+    *grad_y = 0.5f * (shared_phi[halo_index<RowStride>(hx, hy + 1, hz)]
+                    - shared_phi[halo_index<RowStride>(hx, hy - 1, hz)]);
+    *grad_z = 0.5f * (shared_phi[halo_index<RowStride>(hx, hy, hz + 1)]
+                    - shared_phi[halo_index<RowStride>(hx, hy, hz - 1)]);
 }
 
+template <int RowStride = kHaloRowStride>
 __device__ __forceinline__ void load_stencil_plane(
     const float* shared_phi, int ix, int iy, int hz, float* plane) {
 #pragma unroll
     for (int y = 0; y < 3; ++y)
 #pragma unroll
         for (int x = 0; x < 3; ++x)
-            plane[y * 3 + x] = shared_phi[halo_index(ix + x, iy + y, hz)];
+            plane[y * 3 + x] = shared_phi[halo_index<RowStride>(ix + x, iy + y, hz)];
 }
 
 struct StencilValues3D {
@@ -279,6 +281,7 @@ __device__ __forceinline__ float accumulate_stencil_plane(
 
 // Consume z-1 before replacing it with z+1. Two retained planes suffice,
 // and the summation order stays z, then y, then x, as in stencil27.
+template <int RowStride = kHaloRowStride>
 __device__ __forceinline__ StencilValues3D advance_stencil_plane(
     const float* shared_phi, int ix, int iy, int iz,
     float* below, const float* middle) {
@@ -291,7 +294,7 @@ __device__ __forceinline__ StencilValues3D advance_stencil_plane(
     weighted = accumulate_stencil_plane<0>(weighted,
         [&](int x, int y) { return middle[y * 3 + x]; });
     weighted = accumulate_stencil_plane<1>(weighted, [&](int x, int y) {
-        const float value = shared_phi[halo_index(ix + x, iy + y, iz + 2)];
+        const float value = shared_phi[halo_index<RowStride>(ix + x, iy + y, iz + 2)];
         below[y * 3 + x] = value;
         return value;
     });
@@ -886,7 +889,7 @@ __device__ __forceinline__ int next_update_tile(
 
 template <bool CollectMoments, bool WallCoupling,
           UpdateTilePass3D Pass = UpdateTilePass3D::All,
-          bool CompleteOutput = false>
+          bool CompleteOutput = false, bool BulkCopies = false>
 __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                      const UpdateArgs3D& args,
                                      const float* source, float* destination,
@@ -895,7 +898,11 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                      float* halo_pair,
                                      Reduction3D* warp_values,
                                      int* abort_flag,
-                                     volatile int* output_complete = nullptr) {
+                                     volatile int* output_complete = nullptr,
+                                     const CUtensorMap* tensor_map = nullptr,
+                                     unsigned long long* ready = nullptr) {
+    constexpr int row_stride = BulkCopies ? kTmaRowStride : kHaloRowStride;
+    constexpr int buffer_words = BulkCopies ? kTmaBufferWords : kHaloBufferWords;
     CellState3D* state = &args.cells[n];
 
     [[maybe_unused]] Reduction3D local{};
@@ -910,6 +917,10 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         if constexpr (CompleteOutput)
             *output_complete = output_is_fully_overwritten(
                 *state, B, args.storage, args.layout) ? 1 : 0;
+        if constexpr (BulkCopies) {
+            initialize_tma_barrier(&ready[0]);
+            initialize_tma_barrier(&ready[1]);
+        }
     }
     __syncthreads();
     if (*abort_flag == 0) {
@@ -978,11 +989,36 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             tile_end, shards_per_cell, tiles_x, tiles_per_plane, B,
             args, origin_y, state->origin_z);
         float* const halo0 = halo_pair + kHaloLeadingPadding;
-        float* const halo1 = halo0 + kHaloBufferWords;
+        float* const halo1 = halo0 + buffer_words;
+        bool bulk_copy[2] = {false, false};
+        unsigned phase[2] = {0, 0};
+        const auto stage = [&](int tile, int buffer) {
+            float* target = buffer == 0 ? halo0 : halo1;
+            if constexpr (BulkCopies) {
+                const int tx = tile % tiles_x;
+                const int ty = (tile / tiles_x) % tiles_y;
+                const int z = (tile / tiles_per_plane) * kBrickZ - 1;
+                int first_z = 0, last_z = 0;
+                // Reflected wall ghosts use the same scalar-copy path as before.
+                bulk_copy[buffer] = fetch_z(z, &first_z)
+                    && fetch_z(z + kHaloZ - 1, &last_z)
+                    && first_z == z && last_z == z + kHaloZ - 1;
+                if (bulk_copy[buffer]) {
+                    if (threadIdx.x == 0)
+                        load_tma_halo(tensor_map, n, tx * kBrickX - 4,
+                            ty * kBrickY - 1, z + storage_z_offset,
+                            target - kHaloLeadingPadding, &ready[buffer]);
+                    // Keep one pipeline group per tile even when TMA loads it.
+                    __pipeline_commit();
+                    return;
+                }
+            }
+            prefetch_halo<row_stride>(source, B, tile, tiles_x, tiles_y,
+                                      fetch_z, storage_z_offset, target);
+        };
         int parity = 0;
         if (first_tile < tile_end)
-            prefetch_halo(source, B, first_tile, tiles_x, tiles_y,
-                          fetch_z, storage_z_offset, halo0);
+            stage(first_tile, 0);
         int next_tile = first_tile;
         for (int tile = first_tile; tile < tile_end; tile = next_tile) {
             next_tile = next_update_tile<Pass>(
@@ -990,12 +1026,16 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 tiles_x, tiles_per_plane, B, args, origin_y, state->origin_z);
             const bool more = next_tile < tile_end;
             if (more)
-                prefetch_halo(source, B, next_tile,
-                              tiles_x, tiles_y, fetch_z, storage_z_offset,
-                              parity == 0 ? halo1 : halo0);
+                stage(next_tile, 1 - parity);
             __pipeline_wait_prior(more ? 1 : 0);
+            if constexpr (BulkCopies) {
+                if (bulk_copy[parity]) {
+                    wait_tma_halo(&ready[parity], phase[parity]);
+                    phase[parity] ^= 1;
+                }
+            }
             float* const shared_phi = parity == 0 ? halo0 : halo1;
-            if (!halo_any_nonzero(shared_phi)) {
+            if (!halo_any_nonzero<row_stride>(shared_phi)) {
                 if constexpr (CompleteOutput) {
                     if (*output_complete != 0) {
                         const int tz = tile / tiles_per_plane;
@@ -1010,6 +1050,8 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                 tz * kBrickZ + q / (kBrickX * kBrickY));
                     }
                 }
+                if constexpr (BulkCopies)
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 __syncthreads();
                 parity = 1 - parity;
                 continue;
@@ -1040,7 +1082,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     : aggregate_z(args.layout, origin_z, z, &wz);
                 if (!mapped) return;
 
-                const int hi = halo_index(ix + 1, iy + 1, iz + 1);
+                const int hi = halo_index<row_stride>(ix + 1, iy + 1, iz + 1);
                 const float centre = CollectMoments ? shared_phi[hi] : values.centre;
                 if (!isfinite(centre)) {
                     raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
@@ -1049,7 +1091,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 float lap = values.lap, gx = values.gx;
                 float gy = values.gy, gz = values.gz;
                 if constexpr (CollectMoments)
-                    stencil27(shared_phi, ix + 1, iy + 1, iz + 1,
+                    stencil27<row_stride>(shared_phi, ix + 1, iy + 1, iz + 1,
                               &lap, &gx, &gy, &gz);
                 if (centre == 0.0f && lap == 0.0f && gx == 0.0f &&
                     gy == 0.0f && gz == 0.0f) {
@@ -1174,14 +1216,14 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     std::uint32_t current_aggregate = prefetch(0);
                     std::uint32_t queued_aggregate = prefetch(1);
                     float p0[9], p1[9];
-                    load_stencil_plane(shared_phi, ix, iy, 0, p0);
-                    load_stencil_plane(shared_phi, ix, iy, 1, p1);
+                    load_stencil_plane<row_stride>(shared_phi, ix, iy, 0, p0);
+                    load_stencil_plane<row_stride>(shared_phi, ix, iy, 1, p1);
                     const auto advance = [&](float* below,
                                               const float* middle, int iz) {
                         constexpr int distance = 2;
                         const std::uint32_t next_aggregate = iz + distance < kBrickZ
                             ? prefetch(iz + distance) : 0u;
-                        const auto values = advance_stencil_plane(
+                        const auto values = advance_stencil_plane<row_stride>(
                             shared_phi, ix, iy, iz, below, middle);
                         update_voxel(ix, iy, iz, values, current_aggregate, row);
                         current_aggregate = queued_aggregate;
@@ -1195,6 +1237,9 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             }
             if constexpr (!CollectMoments)
                 pending_scatter.finish(state, args.global_flags);
+            // Finish generic reads/zero stores before this buffer is reused by TMA.
+            if constexpr (BulkCopies)
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             __syncthreads();
             parity = 1 - parity;
         }
@@ -2112,8 +2157,10 @@ void k_update_tiled_sharded_impl(UpdateArgs3D args,
 template <bool WallCoupling, UpdateTilePass3D Pass = UpdateTilePass3D::All>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_update_tiled_sharded_fast_impl(UpdateArgs3D args,
-                                      int shards_per_cell) {
-    extern __shared__ __align__(16) float halo_pair[];
+                                      int shards_per_cell,
+                                      const __grid_constant__ CUtensorMap tensor_map) {
+    extern __shared__ __align__(128) float tma_update_halo_pair[];
+    __shared__ __align__(8) unsigned long long ready[2];
     __shared__ int abort_flag;
     __shared__ int output_complete;
     const int block = static_cast<int>(blockIdx.x);
@@ -2123,11 +2170,12 @@ void k_update_tiled_sharded_fast_impl(UpdateArgs3D args,
     const int n = args.selection.cell_index(slot);
     if (cell_is_promoted(args.cells[n], args.B)) return;
     const std::size_t words = stored_cell_words(args.B, args.storage);
-    process_update_shard<false, WallCoupling, Pass, true>(
+    process_update_shard<false, WallCoupling, Pass, true, true>(
         n, shard, shards_per_cell, args,
         args.phi_in + static_cast<std::size_t>(n) * words,
         args.phi_out + static_cast<std::size_t>(n) * words,
-        args.B, nullptr, halo_pair, nullptr, &abort_flag, &output_complete);
+        args.B, nullptr, tma_update_halo_pair, nullptr, &abort_flag,
+        &output_complete, &tensor_map, ready);
 }
 
 // The promoted throughput update splits every pointer-backed cube among
@@ -2789,16 +2837,6 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_update_tiled_fast_impl<true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_impl<false>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_impl<true>),
-        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false>),
-        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true>),
-        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
-            false, UpdateTilePass3D::Boundary>),
-        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
-            false, UpdateTilePass3D::Interior>),
-        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
-            true, UpdateTilePass3D::Boundary>),
-        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
-            true, UpdateTilePass3D::Interior>),
         reinterpret_cast<const void*>(k_update_inplace_impl<false>),
         reinterpret_cast<const void*>(k_update_inplace_impl<true>),
         reinterpret_cast<const void*>(k_update_inplace_fast_impl<false>),
@@ -2820,7 +2858,17 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_measure_promoted_shards_impl<false>),
         reinterpret_cast<const void*>(k_measure_promoted_shards_impl<true>),
     };
-    const void* const measurement_kernels[] = {
+    const void* const bulk_copy_kernels[] = {
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
+            false, UpdateTilePass3D::Boundary>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
+            false, UpdateTilePass3D::Interior>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
+            true, UpdateTilePass3D::Boundary>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
+            true, UpdateTilePass3D::Interior>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<true>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true>),
@@ -2830,7 +2878,7 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true, 160>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<true, true, 160>),
     };
-    for (const void* kernel : measurement_kernels) {
+    for (const void* kernel : bulk_copy_kernels) {
         const auto error = cudaFuncSetAttribute(kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kTmaPipelineBytes);
         if (error != cudaSuccess) return error;
@@ -2891,22 +2939,23 @@ cudaError_t clear_base_output(const UpdateArgs3D& args,
 // Both passes use the same geometry specialization as the unsplit update.
 template <bool WallCoupling>
 void enqueue_base_fast_pass(const UpdateArgs3D& args, int count,
-                            int shards_per_cell, cudaStream_t stream) {
+                            int shards_per_cell, const CUtensorMap& tensor_map,
+                            cudaStream_t stream) {
     const int blocks = count * shards_per_cell;
     if (args.tile_pass == UpdateTilePass3D::Boundary)
         k_update_tiled_sharded_fast_impl<WallCoupling,
                                          UpdateTilePass3D::Boundary>
-            <<<blocks, kThreads3D, kHaloPipelineBytes, stream>>>(
-                args, shards_per_cell);
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
+                args, shards_per_cell, tensor_map);
     else if (args.tile_pass == UpdateTilePass3D::Interior)
         k_update_tiled_sharded_fast_impl<WallCoupling,
                                          UpdateTilePass3D::Interior>
-            <<<blocks, kThreads3D, kHaloPipelineBytes, stream>>>(
-                args, shards_per_cell);
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
+                args, shards_per_cell, tensor_map);
     else
         k_update_tiled_sharded_fast_impl<WallCoupling>
-            <<<blocks, kThreads3D, kHaloPipelineBytes, stream>>>(
-                args, shards_per_cell);
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
+                args, shards_per_cell, tensor_map);
 }
 
 template <bool WallCoupling>
@@ -3032,7 +3081,8 @@ bool launch_measure_cells_only(const MeasureArgs3D& args,
                          args.partials != nullptr;
     if (sharded) {
         CUtensorMap tensor_map{};
-        if (!measurement_tensor_map(args, &tensor_map)) return false;
+        if (!field_tensor_map(args.phi, args.B, args.storage.planes(args.B),
+                              args.N, &tensor_map)) return false;
         if (wall_coupling && args.compute_surface)
             enqueue_base_measurement<true, true>(args, count, tensor_map, stream);
         else if (wall_coupling)
@@ -3362,14 +3412,17 @@ bool launch_update_tiled_sharded_fast(const UpdateArgs3D& args,
         !checked_stored_field_bytes(args.N, args.B, args.storage, &phi_bytes))
         return false;
     if (set_tile_kernel_smem_limit() != cudaSuccess) return false;
+    CUtensorMap tensor_map{};
+    if (!field_tensor_map(args.phi_in, args.B, args.storage.planes(args.B),
+                          args.N, &tensor_map)) return false;
     if (args.tile_pass != UpdateTilePass3D::Interior
         && clear_base_output(args, phi_bytes, stream, true) != cudaSuccess)
         return false;
     const bool wall_coupling = args.layout.hard_wall_channel();
     if (wall_coupling)
-        enqueue_base_fast_pass<true>(args, count, shards_per_cell, stream);
+        enqueue_base_fast_pass<true>(args, count, shards_per_cell, tensor_map, stream);
     else
-        enqueue_base_fast_pass<false>(args, count, shards_per_cell, stream);
+        enqueue_base_fast_pass<false>(args, count, shards_per_cell, tensor_map, stream);
     return cudaPeekAtLastError() == cudaSuccess;
 }
 
@@ -3504,11 +3557,11 @@ cudaError_t sharded_occupancy(int* measurement_blocks_per_sm,
         ? cudaOccupancyMaxActiveBlocksPerMultiprocessor(
               fast_update_blocks_per_sm,
               k_update_tiled_sharded_fast_impl<true>, kThreads3D,
-              kHaloPipelineBytes)
+              kTmaPipelineBytes)
         : cudaOccupancyMaxActiveBlocksPerMultiprocessor(
               fast_update_blocks_per_sm,
               k_update_tiled_sharded_fast_impl<false>, kThreads3D,
-              kHaloPipelineBytes);
+              kTmaPipelineBytes);
 }
 
 }  // namespace detail
