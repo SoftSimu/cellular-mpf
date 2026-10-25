@@ -402,13 +402,18 @@ __device__ __forceinline__ bool halo_any_nonzero(const float* shared_buf) {
              | (value.z != 0.0f) | (value.w != 0.0f);
     };
     const int first = static_cast<int>(threadIdx.x);
-    const int first_row = first / vectors_per_row;
-    const int first_hx = 1 + 4 * (first % vectors_per_row);
-    bool any = nonzero(*reinterpret_cast<const float4*>(
-        shared_buf + first_row * RowStride + first_hx));
+    static_assert(rows * vectors_per_row >= 3 * kThreads3D);
+    // The third vector belongs to this thread's completed asynchronous loads.
+    const int witness = first + 2 * kThreads3D;
+    const int witness_row = witness / vectors_per_row;
+    const int witness_hx =
+        1 + 4 * (witness % vectors_per_row) + (witness_row & 3);
+    // Sample a staged interior word. Different components in adjacent rows
+    // keep this scalar load free of shared-memory bank conflicts.
+    bool any = shared_buf[witness_row * RowStride + witness_hx] != 0.0f;
     // A nonzero witness is enough; scan the rest only to prove an empty halo.
     if (__syncthreads_or(any ? 1 : 0) != 0) return true;
-    for (int q = first + kThreads3D; q < rows * vectors_per_row;
+    for (int q = first; q < rows * vectors_per_row;
          q += kThreads3D) {
         const int row = q / vectors_per_row, hx = 1 + 4 * (q % vectors_per_row);
         const float4 v = *reinterpret_cast<const float4*>(
