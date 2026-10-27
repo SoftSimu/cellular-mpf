@@ -282,6 +282,8 @@ struct MeasureArgs3D {
     CellFieldStorage3D storage{};
 };
 
+struct AggregateBound3D;
+
 struct UpdateArgs3D {
     // Kept mutable so the exact in-place launcher can copy its completed
     // scratch image back after all reads for that cell have finished.
@@ -313,6 +315,12 @@ struct UpdateArgs3D {
     UpdateTilePass3D tile_pass = UpdateTilePass3D::All;
     TileExchangeRegion3D exchange_region{};
     CellFieldStorage3D storage{};
+    // Optional bound prepared for this complete base-cell update. Partitioned
+    // updates and direct callers keep the checked scatter when it is null.
+    AggregateBound3D* aggregate_bound = nullptr;
+    // Requires completed, same-stream measurement of the unchanged phi/S:
+    // every physical input is finite and S >= q_of(phi), or a fatal flag is set.
+    bool inputs_measured = false;
 };
 
 struct TrajPackedCell3D {
@@ -503,7 +511,7 @@ namespace detail {
     cudaStream_t stream = 0);
 // Sharded promoted throughput update: splits every pointer-backed cube among
 // shards_per_cell CTAs with the base sharded update's deterministic tile
-// assignment; outputs are bit-identical to launch_update_promoted's fast
+// assignment; floating-point regrouping can differ from launch_update_promoted's fast
 // path. Clears the destination cubes except when completing an Interior pass.
 [[nodiscard]] bool launch_update_promoted_sharded_fast(
     const UpdateArgs3D& args, float* const* promoted_phi_in,

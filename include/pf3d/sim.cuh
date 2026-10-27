@@ -21,6 +21,7 @@
 #include <vector>
 
 namespace pf3d {
+struct AggregateCoverage3D;
 
 enum class StorageMode3D {
     Auto,
@@ -240,6 +241,7 @@ private:
     std::uint64_t trajectory_every_ = 0;
     std::uint64_t last_trajectory_step_ =
         static_cast<std::uint64_t>(-1);
+    AggregateCoverage3D* aggregate_coverage_ = nullptr;
 };
 
 }  // namespace pf3d

@@ -5,6 +5,7 @@
 #include "../../include/pf3d/trajectory_header.hpp"
 #include "../../include/pf3d/reference.hpp"
 #include "../../include/palmieri_initializer.hpp"
+#include "../../include/pf3d/aggregate_coverage.cuh"
 #include "../../include/relaxed_centres.hpp"
 
 #include <algorithm>
@@ -163,6 +164,7 @@ Sim3D::~Sim3D() {
     close_trajectory();
     cudaSetDevice(options_.device);
     if (stream_) cudaStreamSynchronize(stream_);
+    destroy_aggregate_coverage(aggregate_coverage_);
     if (boundary_output_) {
         boundary_output_->close(false);
         boundary_output_.reset();
@@ -629,6 +631,17 @@ bool Sim3D::allocate(const SimParams3D& params,
         if (gpu_ok(cudaMalloc(pointer, bytes), name)) return true;
         return false;
     };
+    if (selected_mode_ == StorageMode3D::Throughput && !options_.strict &&
+        params_.resolved_wall_channel() && B_ < layout_.nx && B_ < layout_.ny) {
+        aggregate_coverage_ = create_aggregate_coverage(
+            layout_, params.num_cells, adaptive_budget_remaining_);
+        if (!aggregate_coverage_) {
+            std::fprintf(stderr, "[3d] cannot allocate aggregate coverage workspace\n");
+            return false;
+        }
+        required_device_bytes_ += aggregate_coverage_->bytes;
+        adaptive_budget_remaining_ -= aggregate_coverage_->bytes;
+    }
     for (int i = 0; i < phi_buffers_; ++i)
         if (!allocate_device(reinterpret_cast<void**>(&d_phi_[i]), one_phi,
                              "cudaMalloc(phi)")) return false;
@@ -1557,6 +1570,17 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     // Surface does not enter the evolution equations. It is measured only at
     // its requested cadence or before output that requires it.
     update.compute_surface = false;
+    // refresh_measurements checked these immutable source arrays in this
+    // stream. The update still checks newly computed values and its writes.
+    update.inputs_measured = phi_buffers_ == 2 && params_.resolved_wall_channel();
+    // The proof covers one complete, unpartitioned base update. Split GPU
+    // passes and strict/in-place paths retain ordinary checked additions.
+    if (aggregate_coverage_ && !exchange_region && !selection_.ids &&
+        !measured_update && fast_base_update_shards(UpdateTilePass3D::All) > 1) {
+        update.aggregate_bound = aggregate_coverage_->bound;
+        if (!prepare_aggregate_coverage(*aggregate_coverage_, update, stream_))
+            return false;
+    }
     // Only the moment-free update may be reordered. Strict measured steps keep
     // their pinned reduction grouping and perform the ordinary complete walk.
     if (exchange_region && !measured_update) {
@@ -1600,6 +1624,8 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
         std::fprintf(stderr, "[3d] invalid update launch contract\n");
         return false;
     }
+    if (update.aggregate_bound && !finish_aggregate_coverage(update, stream_))
+        return false;
     if (!phase_mark(4)) return false;
     if (active_promoted_count() > 0) {
         const int promoted_count = active_promoted_count();

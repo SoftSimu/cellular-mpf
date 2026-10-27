@@ -329,6 +329,46 @@ inline bool cell_owner_rank(const AllocatedBrick& cell,
     return true;
 }
 
+// At an overlap between ranks, at least one brick crosses into the other
+// owner's half-domain. Those overhangs bound every required peer contribution,
+// including arbitrarily small field tails; no phase-field threshold is used.
+inline bool allocated_seam_rows(const TwoRankSubstrateGeometry& geometry,
+                                 std::uint32_t base_edge,
+                                 const AllocatedBrick* cells, std::size_t count,
+                                 RowSet* rows) {
+    if (!rows || (count != 0 && !cells) ||
+        validate(geometry) != TwoRankValidation::Ok) return false;
+    WrappedRows halves[2]{};
+    halves[0].count = halves[1].count = 2;
+    for (std::size_t i = 0; i < count; ++i) {
+        int owner = -1;
+        WrappedRows wrapped{};
+        if (!cell_owner_rank(cells[i], base_edge, geometry, &owner) ||
+            !cell_wrapped_y(cells[i], base_edge, geometry.ny, &wrapped))
+            return false;
+        const auto opposite = rank_ownership(geometry, 1 - owner);
+        for (int p = 0; p < wrapped.count; ++p) {
+            const int lo = wrapped.pieces[p].lo > opposite.y_lo
+                ? wrapped.pieces[p].lo : opposite.y_lo;
+            const int hi = wrapped.pieces[p].hi < opposite.y_hi
+                ? wrapped.pieces[p].hi : opposite.y_hi;
+            if (lo >= hi) continue;
+            // A connected brick containing its ownership midpoint can enter
+            // the opposite half only through one of that half's two ends.
+            const int end = lo == opposite.y_lo ? 0 : 1;
+            if (end == 1 && hi != opposite.y_hi) return false;
+            auto& interval = halves[1 - owner].pieces[end];
+            if (empty(interval)) interval = {lo, hi};
+            else {
+                if (lo < interval.lo) interval.lo = lo;
+                if (hi > interval.hi) interval.hi = hi;
+            }
+        }
+    }
+    *rows = substrate_planner_detail::canonical_union(halves[0], halves[1]);
+    return true;
+}
+
 inline bool pitched_payload_bytes(int rows, int pitch_x, int z_extent,
                                   std::size_t element_bytes,
                                   std::size_t* bytes) {
@@ -439,6 +479,16 @@ inline SeamExchangePlan build_seam_exchange_plan(
     const std::int64_t half_width = static_half_width + max_origin_displacement;
     plan.bands = seam_band_union(geometry, half_width);
     if (!plan.bands.valid) return plan;
+    // A per-step plan can use actual allocated overhangs. Frozen plans retain
+    // the conservative swept envelope until ownership is recomputed.
+    if (max_origin_displacement == 0) {
+        RowSet tight{};
+        if (allocated_seam_rows(geometry, runtime_base_edge, all_cells,
+                                 cell_count, &tight)) {
+            plan.bands.rows = tight;
+            plan.bands.full_domain = tight.total_rows == geometry.ny;
+        }
+    }
 
     bool have_z = false;
     for (std::size_t i = 0; i < cell_count; ++i) {

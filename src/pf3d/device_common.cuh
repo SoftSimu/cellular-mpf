@@ -26,6 +26,10 @@ __device__ __forceinline__ std::size_t stored_cell_words(
 }
 
 __device__ __forceinline__ std::size_t local_index(int x, int y, int z, int B) {
+    // Callers have already bounded local coordinates. For these cube sizes,
+    // form the element offset in 32 bits before widening the final address.
+    if (B <= 1024)
+        return static_cast<std::uint32_t>((z * B + y) * B + x);
     return (static_cast<std::size_t>(z) * static_cast<std::size_t>(B)
             + static_cast<std::size_t>(y)) * static_cast<std::size_t>(B)
             + static_cast<std::size_t>(x);

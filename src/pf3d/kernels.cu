@@ -10,8 +10,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <type_traits>
 
 #include "tma_halo.cuh"
+#include "aggregate_coverage.cuh"
+#include "tma_aggregate.cuh"
 
 namespace pf3d {
 namespace {
@@ -242,57 +245,44 @@ __device__ __forceinline__ void stencil27(const float* shared_phi,
 template <int RowStride = kHaloRowStride>
 __device__ __forceinline__ void load_stencil_plane(
     const float* shared_phi, int ix, int iy, int hz, float* plane) {
+    // Reuse the face/edge plane sums in adjacent stencil evaluations.
+    // The 27-point weights are unchanged; additions are regrouped.
+    float values[9];
 #pragma unroll
     for (int y = 0; y < 3; ++y)
 #pragma unroll
         for (int x = 0; x < 3; ++x)
-            plane[y * 3 + x] = shared_phi[halo_index<RowStride>(ix + x, iy + y, hz)];
+            values[y * 3 + x] = shared_phi[halo_index<RowStride>(ix + x, iy + y, hz)];
+    const float corners = (values[0] + values[2]) + (values[6] + values[8]);
+    const float edges = (values[1] + values[3]) + (values[5] + values[7]);
+    plane[0] = values[4];
+    plane[1] = corners + 3.0f * edges + 14.0f * values[4];
+    plane[2] = 3.0f * corners + 14.0f * edges - 128.0f * values[4];
+    plane[3] = 0.5f * (values[5] - values[3]);
+    plane[4] = 0.5f * (values[7] - values[1]);
 }
 
 struct StencilValues3D {
     float centre, lap, gx, gy, gz;
 };
 
-template <int ZDistance, typename Fetch>
-__device__ __forceinline__ float accumulate_stencil_plane(
-    float weighted, const Fetch& fetch) {
-#pragma unroll
-    for (int y = 0; y < 3; ++y) {
-#pragma unroll
-        for (int x = 0; x < 3; ++x) {
-            const int distance = ZDistance + (x != 1) + (y != 1);
-            if (distance == 0) continue;
-            const int weight = distance == 1 ? kLapFaceW
-                             : distance == 2 ? kLapEdgeW : kLapCornerW;
-            weighted += static_cast<float>(weight) * fetch(x, y);
-        }
-    }
-    return weighted;
-}
-
-// Consume z-1 before replacing it with z+1. Two retained planes suffice,
-// and the summation order stays z, then y, then x, as in stencil27.
+// Consume z-1 before replacing it with z+1; retain only two planes of
+// reusable sums rather than reloading the full 27-point neighborhood.
 template <int RowStride = kHaloRowStride>
 __device__ __forceinline__ StencilValues3D advance_stencil_plane(
     const float* shared_phi, int ix, int iy, int iz,
     float* below, const float* middle) {
-    const float lower_centre = below[4];
+    static_assert(kLapCentreW == -128 && kLapFaceW == 14 &&
+                  kLapEdgeW == 3 && kLapCornerW == 1);
+    const float lower_centre = below[0], lower_weighted = below[1];
+    load_stencil_plane<RowStride>(shared_phi, ix, iy, iz + 2, below);
     StencilValues3D result{};
-    result.centre = middle[4];
-    float weighted = static_cast<float>(kLapCentreW) * result.centre;
-    weighted = accumulate_stencil_plane<1>(weighted,
-        [&](int x, int y) { return below[y * 3 + x]; });
-    weighted = accumulate_stencil_plane<0>(weighted,
-        [&](int x, int y) { return middle[y * 3 + x]; });
-    weighted = accumulate_stencil_plane<1>(weighted, [&](int x, int y) {
-        const float value = shared_phi[halo_index<RowStride>(ix + x, iy + y, iz + 2)];
-        below[y * 3 + x] = value;
-        return value;
-    });
-    result.lap = weighted * static_cast<float>(1.0 / kLapDenom);
-    result.gx = 0.5f * (middle[5] - middle[3]);
-    result.gy = 0.5f * (middle[7] - middle[1]);
-    result.gz = 0.5f * (below[4] - lower_centre);
+    result.centre = middle[0];
+    result.lap = (lower_weighted + middle[2] + below[1])
+               * static_cast<float>(1.0 / kLapDenom);
+    result.gx = middle[3];
+    result.gy = middle[4];
+    result.gz = 0.5f * (below[0] - lower_centre);
     return result;
 }
 
@@ -885,7 +875,8 @@ __device__ __forceinline__ int next_update_tile(
 
 template <bool CollectMoments, bool WallCoupling,
           UpdateTilePass3D Pass = UpdateTilePass3D::All,
-          bool CompleteOutput = false, bool BulkCopies = false>
+          bool CompleteOutput = false, bool BulkCopies = false,
+          bool BoundedAggregate = false, bool InputsMeasured = false>
 __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                      const UpdateArgs3D& args,
                                      const float* source, float* destination,
@@ -961,6 +952,8 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         const float volume = static_cast<float>(
             args.volume_scale * (args.V0 - state->V));
         const int tiles_x = (B + kBrickX - 1) / kBrickX;
+        const unsigned aggregate_limit = BoundedAggregate
+            ? args.aggregate_bound->contribution_limit : UINT32_MAX;
         const int tiles_y = (B + kBrickY - 1) / kBrickY;
         const int tiles_z = (B + kBrickZ - 1) / kBrickZ;
         const int tiles_per_plane = tiles_x * tiles_y;
@@ -985,8 +978,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             args, origin_y, state->origin_z);
         float* const halo0 = halo_pair + kHaloLeadingPadding;
         float* const halo1 = halo0 + buffer_words;
-        bool bulk_copy[2] = {false, false};
-        unsigned phase[2] = {0, 0};
+        unsigned bulk_mask = 0, phase_mask = 0;
         const auto stage = [&](int tile, int buffer) {
             float* target = buffer == 0 ? halo0 : halo1;
             if constexpr (BulkCopies) {
@@ -994,11 +986,13 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 const int ty = (tile / tiles_x) % tiles_y;
                 const int z = (tile / tiles_per_plane) * kBrickZ - 1;
                 int first_z = 0, last_z = 0;
-                // Reflected wall ghosts use the same scalar-copy path as before.
-                bulk_copy[buffer] = fetch_z(z, &first_z)
+                // Reflected wall ghosts require the scalar-copy path.
+                const bool use_bulk = fetch_z(z, &first_z)
                     && fetch_z(z + kHaloZ - 1, &last_z)
                     && first_z == z && last_z == z + kHaloZ - 1;
-                if (bulk_copy[buffer]) {
+                bulk_mask = (bulk_mask & ~(1u << buffer))
+                          | (static_cast<unsigned>(use_bulk) << buffer);
+                if (use_bulk) {
                     if (threadIdx.x == 0)
                         load_tma_halo(tensor_map, n, tx * kBrickX - 4,
                             ty * kBrickY - 1, z + storage_z_offset,
@@ -1024,9 +1018,9 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 stage(next_tile, 1 - parity);
             __pipeline_wait_prior(more ? 1 : 0);
             if constexpr (BulkCopies) {
-                if (bulk_copy[parity]) {
-                    wait_tma_halo(&ready[parity], phase[parity]);
-                    phase[parity] ^= 1;
+                if (bulk_mask & (1u << parity)) {
+                    wait_tma_halo(&ready[parity], (phase_mask >> parity) & 1u);
+                    phase_mask ^= 1u << parity;
                 }
             }
             float* const shared_phi = parity == 0 ? halo0 : halo1;
@@ -1059,179 +1053,258 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             const int y0 = ty * kBrickY;
             const int z0 = tz * kBrickZ;
 
-            [[maybe_unused]] PendingScatter3D pending_scatter;
-            [[maybe_unused]] const std::size_t aggregate_plane_words =
-                static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
-            const auto update_voxel = [&](int ix, int iy, int iz,
-                                          StencilValues3D values,
-                                          std::uint32_t prefetched = 0u,
-                                          std::size_t aggregate_row = 0) {
-                const int x = x0 + ix, y = y0 + iy, z = z0 + iz;
-                if constexpr (CollectMoments) {
-                    if (x >= B || y >= B || z >= B) return;
-                } else {
-                    if (z >= B) return;
-                }
-                int wz = 0;
-                const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
-                    : aggregate_z(args.layout, origin_z, z, &wz);
-                if (!mapped) return;
-
-                const int hi = halo_index<row_stride>(ix + 1, iy + 1, iz + 1);
-                const float centre = CollectMoments ? shared_phi[hi] : values.centre;
-                if (!isfinite(centre)) {
-                    raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
-                    return;
-                }
-                float lap = values.lap, gx = values.gx;
-                float gy = values.gy, gz = values.gz;
-                if constexpr (CollectMoments)
-                    stencil27<row_stride>(shared_phi, ix + 1, iy + 1, iz + 1,
-                              &lap, &gx, &gy, &gz);
-                if (centre == 0.0f && lap == 0.0f && gx == 0.0f &&
-                    gy == 0.0f && gz == 0.0f) {
-                    if constexpr (CompleteOutput) {
-                        if (*output_complete != 0)
-                            destination[field_index_at_world_z(
-                                x, y, z, wz, B, args.storage)] = 0.0f;
+            const auto visit_tile = [&](auto interior_tag, auto measured_tag) {
+                constexpr bool Measured = decltype(measured_tag)::value;
+                constexpr bool Interior = decltype(interior_tag)::value;
+                [[maybe_unused]] PendingScatter3D pending_scatter;
+                [[maybe_unused]] const std::size_t aggregate_plane_words =
+                    static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
+                const auto update_voxel = [&](int ix, int iy, int iz, StencilValues3D values,
+                                              std::uint32_t prefetched = 0u,
+                                              std::size_t aggregate_row = 0,
+                                              [[maybe_unused]] std::size_t output_index = 0) {
+                    const int x = x0 + ix, y = y0 + iy, z = z0 + iz;
+                    int wz = 0;
+                    if constexpr (Interior) {
+                        wz = z_map.origin + z;
+                    } else {
+                        if constexpr (CollectMoments) {
+                            if (x >= B || y >= B || z >= B)
+                                return;
+                        } else {
+                            if (z >= B)
+                                return;
+                        }
+                        const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
+                                                      : aggregate_z(args.layout, origin_z, z, &wz);
+                        if (!mapped)
+                            return;
                     }
-                    return;
-                }
 
-                std::size_t aggregate_index;
-                if constexpr (CollectMoments)
-                    aggregate_index = s_index(args.layout,
-                        wrap_offset(origin_x, x, args.layout.nx),
-                        wrap_offset(origin_y, y, args.layout.ny), wz);
-                else
-                    aggregate_index = aggregate_row
-                        + static_cast<std::size_t>(wz) * aggregate_plane_words;
-                const std::uint32_t aggregate =
-                    !CollectMoments ? prefetched :
-                    args.S_in[aggregate_index];
-                float other = other_field(aggregate, centre, state,
-                                          args.global_flags);
-                if constexpr (WallCoupling)
-                    other += weighted_wall_field<true>(
-                        args.wall, wz);
-                const float rhs = gamma * lap
-                    - bulk * centre * (1.0f - centre) * (1.0f - 2.0f * centre)
-                    + volume * centre
-                    - args.interaction_coeff * centre * other
-                    - (velocity_x * gx + velocity_y * gy
-                       + velocity_z * gz);
-                const float next = centre + args.dt * rhs;
-                if (!isfinite(next)) {
-                    raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
-                    return;
-                }
-                if (args.layout.substrate_slab() &&
-                    wz == args.layout.nz - 1 && fabsf(next) > kSupportEps) {
-                    raise_flag(state, args.global_flags,
-                               FLAG3D_SLAB_TOP_CONTACT);
-                    return;
-                }
+                    const int hi = halo_index<row_stride>(ix + 1, iy + 1, iz + 1);
+                    const float centre = CollectMoments ? shared_phi[hi] : values.centre;
+                    if constexpr (!Measured) {
+                        if (!isfinite(centre)) {
+                            raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
+                            return;
+                        }
+                    }
+                    float lap = values.lap, gx = values.gx;
+                    float gy = values.gy, gz = values.gz;
+                    if constexpr (CollectMoments)
+                        stencil27<row_stride>(shared_phi, ix + 1, iy + 1, iz + 1, &lap, &gx, &gy,
+                                              &gz);
+                    if constexpr (CollectMoments) {
+                        if (centre == 0.0f && lap == 0.0f && gx == 0.0f && gy == 0.0f &&
+                            gz == 0.0f) {
+                            if constexpr (CompleteOutput) {
+                                if (*output_complete != 0)
+                                    destination[field_index_at_world_z(x, y, z, wz, B,
+                                                                       args.storage)] = 0.0f;
+                            }
+                            return;
+                        }
+                    }
 
-                const int dx = x - shift_x;
-                const int dy = y - shift_y;
-                const int dz = z - shift_z;
-                if (static_cast<unsigned>(dx) >= static_cast<unsigned>(B) ||
-                    static_cast<unsigned>(dy) >= static_cast<unsigned>(B) ||
-                    static_cast<unsigned>(dz) >= static_cast<unsigned>(B)) {
-                    if (fabsf(next) > kSupportEps)
-                        raise_flag(state, args.global_flags,
-                                   FLAG3D_DESTINATION_CLIP);
-                    return;
-                }
-                destination[field_index_at_world_z(dx, dy, dz, wz, B, args.storage)] = next;
-
-                if (args.S_out != nullptr) {
-                    // Integer Q5.27 additions are exact and order-independent;
-                    // sharding changes only which CTA issues each atomic.
-                    if constexpr (!CollectMoments)
-                        pending_scatter.add(args.S_out,
-                            aggregate_index, next,
-                            state, args.global_flags);
+                    std::size_t aggregate_index;
+                    if constexpr (CollectMoments)
+                        aggregate_index =
+                            s_index(args.layout, wrap_offset(origin_x, x, args.layout.nx),
+                                    wrap_offset(origin_y, y, args.layout.ny), wz);
+                    else if constexpr (Interior)
+                        aggregate_index = aggregate_row;
                     else
-                        scatter_value(args.S_out,
-                                      aggregate_index, next,
-                                      state, args.global_flags);
-                }
-
-                if constexpr (CollectMoments) {
-                    const double square = static_cast<double>(next)
-                                        * static_cast<double>(next);
-                    local.V += square;
-                    local.Cx += square * static_cast<double>(dx);
-                    local.Cy += square * static_cast<double>(dy);
-                    local.Cz += square * static_cast<double>(dz);
-                    local.phi_max_bits = max(
-                        local.phi_max_bits, __float_as_uint(fabsf(next)));
-                    if (fabsf(next) > kSupportEps) {
-                        local.lo_x = min(local.lo_x, dx);
-                        local.hi_x = max(local.hi_x, dx);
-                        local.lo_y = min(local.lo_y, dy);
-                        local.hi_y = max(local.hi_y, dy);
-                        local.lo_z = min(local.lo_z, dz);
-                        local.hi_z = max(local.hi_z, dz);
+                        aggregate_index =
+                            aggregate_row + static_cast<std::size_t>(wz) * aggregate_plane_words;
+                    const std::uint32_t aggregate =
+                        !CollectMoments ? prefetched : args.S_in[aggregate_index];
+                    float other;
+                    if constexpr (Measured)
+                        other = static_cast<float>(aggregate - q_of(centre)) * kQInvF;
+                    else
+                        other = other_field(aggregate, centre, state, args.global_flags);
+                    if constexpr (WallCoupling)
+                        other += weighted_wall_field<true>(args.wall, wz);
+                    const float rhs = gamma * lap -
+                                      bulk * centre * (1.0f - centre) * (1.0f - 2.0f * centre) +
+                                      volume * centre - args.interaction_coeff * centre * other -
+                                      (velocity_x * gx + velocity_y * gy + velocity_z * gz);
+                    const float next = centre + args.dt * rhs;
+                    if (!isfinite(next)) {
+                        raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
+                        return;
                     }
+                    if constexpr (!Interior || !WallCoupling) {
+                        if (args.layout.substrate_slab() && wz == args.layout.nz - 1 &&
+                            fabsf(next) > kSupportEps) {
+                            raise_flag(state, args.global_flags, FLAG3D_SLAB_TOP_CONTACT);
+                            return;
+                        }
+                    }
+
+                    const int dx = x - shift_x;
+                    const int dy = y - shift_y;
+                    const int dz = z - shift_z;
+                    if constexpr (!Interior) {
+                        if (static_cast<unsigned>(dx) >= static_cast<unsigned>(B) ||
+                            static_cast<unsigned>(dy) >= static_cast<unsigned>(B) ||
+                            static_cast<unsigned>(dz) >= static_cast<unsigned>(B)) {
+                            if (fabsf(next) > kSupportEps)
+                                raise_flag(state, args.global_flags, FLAG3D_DESTINATION_CLIP);
+                            return;
+                        }
+                    }
+                    if constexpr (Interior)
+                        destination[output_index] = next;
+                    else
+                        destination[field_index_at_world_z(dx, dy, dz, wz, B, args.storage)] = next;
+
+                    if (args.S_out != nullptr) {
+                        // Integer Q5.27 additions are exact and order-independent;
+                        // sharding changes only which CTA issues each atomic.
+                        if constexpr (!CollectMoments) {
+                            if constexpr (BoundedAggregate) {
+                                scatter_with_coverage(args.S_out, aggregate_index, next, state,
+                                                      args.global_flags, aggregate_limit,
+                                                      args.aggregate_bound);
+                            } else
+                                pending_scatter.add(args.S_out, aggregate_index, next, state,
+                                                    args.global_flags);
+                        } else
+                            scatter_value(args.S_out, aggregate_index, next, state,
+                                          args.global_flags);
+                    }
+
+                    if constexpr (CollectMoments) {
+                        const double square = static_cast<double>(next) * static_cast<double>(next);
+                        local.V += square;
+                        local.Cx += square * static_cast<double>(dx);
+                        local.Cy += square * static_cast<double>(dy);
+                        local.Cz += square * static_cast<double>(dz);
+                        local.phi_max_bits = max(local.phi_max_bits, __float_as_uint(fabsf(next)));
+                        if (fabsf(next) > kSupportEps) {
+                            local.lo_x = min(local.lo_x, dx);
+                            local.hi_x = max(local.hi_x, dx);
+                            local.lo_y = min(local.lo_y, dy);
+                            local.hi_y = max(local.hi_y, dy);
+                            local.lo_z = min(local.lo_z, dz);
+                            local.hi_z = max(local.hi_z, dz);
+                        }
+                    }
+                };
+                if constexpr (CollectMoments) {
+                    for (int q = static_cast<int>(threadIdx.x); q < kBrickVoxels; q += kThreads3D) {
+                        const int ix = q % kBrickX;
+                        const int iy = (q / kBrickX) % kBrickY;
+                        const int iz = q / (kBrickX * kBrickY);
+                        update_voxel(ix, iy, iz, {});
+                    }
+                } else {
+                    // A warp retains its x-row while advancing through z. Each
+                    // stencil reuses two XY planes and loads only the next plane.
+                    const int ix = static_cast<int>(threadIdx.x) % kBrickX;
+                    for (int iy = static_cast<int>(threadIdx.x) / kBrickX; iy < kBrickY;
+                         iy += kThreads3D / kBrickX) {
+                        const int x = x0 + ix, y = y0 + iy;
+                        if constexpr (!Interior)
+                            if (x >= B || y >= B)
+                                continue;
+                        const std::size_t row =
+                            s_index(args.layout, wrap_offset(origin_x, x, args.layout.nx),
+                                    wrap_offset(origin_y, y, args.layout.ny), 0);
+                        const std::size_t plane_words =
+                            static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
+                        const auto prefetch = [&](int iz) {
+                            int wz = 0;
+                            const int z = z0 + iz;
+                            if constexpr (Interior) {
+                                wz = z_map.origin + z;
+                                return load_aggregate_ahead(
+                                    args.S_in + row + static_cast<std::size_t>(wz) * plane_words);
+                            } else {
+                                const bool mapped =
+                                    bounded_z ? z_map.aggregate(z, &wz)
+                                              : aggregate_z(args.layout, origin_z, z, &wz);
+                                return z < B && mapped
+                                           ? load_aggregate_ahead(args.S_in + row +
+                                                                  static_cast<std::size_t>(wz) *
+                                                                      plane_words)
+                                           : 0u;
+                            }
+                        };
+                        std::uint32_t current_aggregate = prefetch(0);
+                        std::uint32_t queued_aggregate = prefetch(1);
+                        std::size_t aggregate_cursor = 0, destination_cursor = 0;
+                        if constexpr (Interior) {
+                            const int first_world_z = z_map.origin + z0;
+                            aggregate_cursor =
+                                row + static_cast<std::size_t>(first_world_z) * plane_words;
+                            destination_cursor =
+                                field_index_at_world_z(x - shift_x, y - shift_y, z0 - shift_z,
+                                                       first_world_z, B, args.storage);
+                        }
+                        float p0[9], p1[9];
+                        load_stencil_plane<row_stride>(shared_phi, ix, iy, 0, p0);
+                        load_stencil_plane<row_stride>(shared_phi, ix, iy, 1, p1);
+                        const auto advance = [&](float *below, const float *middle, int iz) {
+                            constexpr int distance = 2;
+                            std::uint32_t next_aggregate;
+                            if constexpr (Interior)
+                                next_aggregate =
+                                    iz + distance < kBrickZ
+                                        ? load_aggregate_ahead(args.S_in + aggregate_cursor +
+                                                               distance * plane_words)
+                                        : 0u;
+                            else
+                                next_aggregate =
+                                    iz + distance < kBrickZ ? prefetch(iz + distance) : 0u;
+                            const auto values = advance_stencil_plane<row_stride>(
+                                shared_phi, ix, iy, iz, below, middle);
+                            if constexpr (Interior) {
+                                update_voxel(ix, iy, iz, values, current_aggregate,
+                                             aggregate_cursor, destination_cursor);
+                                aggregate_cursor += plane_words;
+                                destination_cursor += static_cast<std::size_t>(B) * B;
+                            } else
+                                update_voxel(ix, iy, iz, values, current_aggregate, row);
+                            current_aggregate = queued_aggregate;
+                            queued_aggregate = next_aggregate;
+                        };
+                        for (int iz = 0; iz < kBrickZ; iz += 2) {
+                            advance(p0, p1, iz);
+                            if (iz + 1 < kBrickZ)
+                                advance(p1, p0, iz + 1);
+                        }
+                    }
+                }
+                if constexpr (!CollectMoments)
+                    pending_scatter.finish(state, args.global_flags);
+            };
+            const auto visit_checked_tile = [&](auto measured_tag) {
+                if constexpr (!CollectMoments) {
+                    // Prove both source and translated destination intervals once.
+                    const bool interior = bounded_z && x0 + kBrickX <= B && y0 + kBrickY <= B &&
+                                          z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi &&
+                                          x0 >= shift_x && x0 - shift_x + kBrickX <= B &&
+                                          y0 >= shift_y && y0 - shift_y + kBrickY <= B &&
+                                          z0 >= shift_z && z0 - shift_z + kBrickZ <= B;
+                    if (interior)
+                        visit_tile(std::true_type{}, measured_tag);
+                    else
+                        visit_tile(std::false_type{}, measured_tag);
+                } else {
+                    visit_tile(std::false_type{}, std::false_type{});
                 }
             };
-            if constexpr (CollectMoments) {
-                for (int q = static_cast<int>(threadIdx.x); q < kBrickVoxels;
-                     q += kThreads3D) {
-                    const int ix = q % kBrickX;
-                    const int iy = (q / kBrickX) % kBrickY;
-                    const int iz = q / (kBrickX * kBrickY);
-                    update_voxel(ix, iy, iz, {});
-                }
-            } else {
-                // A warp retains its x-row while advancing through z. Each
-                // stencil reuses two XY planes and loads only the next plane.
-                const int ix = static_cast<int>(threadIdx.x) % kBrickX;
-                for (int iy = static_cast<int>(threadIdx.x) / kBrickX;
-                     iy < kBrickY; iy += kThreads3D / kBrickX) {
-                    const int x = x0 + ix, y = y0 + iy;
-                    if (x >= B || y >= B) continue;
-                    const std::size_t row = s_index(args.layout,
-                        wrap_offset(origin_x, x, args.layout.nx),
-                        wrap_offset(origin_y, y, args.layout.ny), 0);
-                    const std::size_t plane_words =
-                        static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
-                    const auto prefetch = [&](int iz) {
-                        int wz = 0;
-                        const int z = z0 + iz;
-                        const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
-                            : aggregate_z(args.layout, origin_z, z, &wz);
-                        return z < B && mapped
-                            ? load_aggregate_ahead(args.S_in + row
-                                + static_cast<std::size_t>(wz) * plane_words)
-                            : 0u;
-                    };
-                    std::uint32_t current_aggregate = prefetch(0);
-                    std::uint32_t queued_aggregate = prefetch(1);
-                    float p0[9], p1[9];
-                    load_stencil_plane<row_stride>(shared_phi, ix, iy, 0, p0);
-                    load_stencil_plane<row_stride>(shared_phi, ix, iy, 1, p1);
-                    const auto advance = [&](float* below,
-                                              const float* middle, int iz) {
-                        constexpr int distance = 2;
-                        const std::uint32_t next_aggregate = iz + distance < kBrickZ
-                            ? prefetch(iz + distance) : 0u;
-                        const auto values = advance_stencil_plane<row_stride>(
-                            shared_phi, ix, iy, iz, below, middle);
-                        update_voxel(ix, iy, iz, values, current_aggregate, row);
-                        current_aggregate = queued_aggregate;
-                        queued_aggregate = next_aggregate;
-                    };
-                    for (int iz = 0; iz < kBrickZ; iz += 2) {
-                        advance(p0, p1, iz);
-                        if (iz + 1 < kBrickZ) advance(p1, p0, iz + 1);
-                    }
-                }
-            }
-            if constexpr (!CollectMoments)
-                pending_scatter.finish(state, args.global_flags);
+            if constexpr (InputsMeasured) {
+                visit_checked_tile(std::true_type{});
+            } else if constexpr (BulkCopies && !CollectMoments && Pass == UpdateTilePass3D::All) {
+                if (args.inputs_measured)
+                    visit_checked_tile(std::true_type{});
+                else
+                    visit_checked_tile(std::false_type{});
+            } else
+                visit_checked_tile(std::false_type{});
             // Finish generic reads/zero stores before this buffer is reused by TMA.
             if constexpr (BulkCopies)
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -1811,12 +1884,22 @@ __global__ void k_finalize_measure_promoted(
 template <bool WallCoupling, bool ComputeSurface = false, int FixedEdge = 0>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_measure_cell_shards_impl(MeasureArgs3D args,
-                                const __grid_constant__ CUtensorMap tensor_map) {
+                                const __grid_constant__ CUtensorMap tensor_map,
+                                const __grid_constant__ CUtensorMap aggregate_map) {
     if constexpr (FixedEdge != 0) args.B = FixedEdge;
     // A distinct extern symbol keeps its alignment independent of other kernels.
     extern __shared__ __align__(128) float tma_halo_pair[];
     float* const halo_pair = tma_halo_pair;
-    __shared__ Reduction3D warp_values[kWarps3D];
+    // The aggregate tile is dead before the final CTA reduction begins.
+    union MeasureWorkspace {
+        std::uint32_t aggregate[kAggregateTileWords];
+        Reduction3D warps[kWarps3D];
+    };
+    __shared__ __align__(128) MeasureWorkspace workspace;
+    std::uint32_t* const shared_aggregate = workspace.aggregate;
+    Reduction3D* const warp_values = workspace.warps;
+    __shared__ __align__(8) unsigned long long aggregate_ready;
+    unsigned aggregate_phase = 0;
     __shared__ __align__(8) unsigned long long ready[2];
     const int block = static_cast<int>(blockIdx.x);
     const int slot = block / args.shards;
@@ -1832,6 +1915,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
     if (threadIdx.x == 0) {
         initialize_tma_barrier(&ready[0]);
         initialize_tma_barrier(&ready[1]);
+        initialize_tma_barrier(&aggregate_ready);
     }
     __syncthreads();
     const int ox = wrap_origin(state->origin_x, args.layout.nx);
@@ -1865,8 +1949,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
         + (shard - begin_remainder + args.shards) % args.shards;
     float* const halo0 = halo_pair + kHaloLeadingPadding;
     float* const halo1 = halo0 + kTmaBufferWords;
-    bool bulk[2] = {false, false};
-    unsigned phase[2] = {0, 0};
+    unsigned bulk_mask = 0, phase_mask = 0;
     const auto stage = [&](int brick, int buffer) {
         float* destination = buffer == 0 ? halo0 : halo1;
         const int tx = brick % bricks_x;
@@ -1875,10 +1958,12 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
         const int z = tz * kBrickZ - 1;
         int first_z = 0, last_z = 0;
         // Reflected wall ghosts retain the established scalar-copy path.
-        bulk[buffer] = fetch_z(z, &first_z)
+        const bool use_bulk = fetch_z(z, &first_z)
             && fetch_z(z + kHaloZ - 1, &last_z)
             && first_z == z && last_z == z + kHaloZ - 1;
-        if (bulk[buffer]) {
+        bulk_mask = (bulk_mask & ~(1u << buffer))
+                  | (static_cast<unsigned>(use_bulk) << buffer);
+        if (use_bulk) {
             if (threadIdx.x == 0)
                 load_tma_halo(&tensor_map, n, tx * kBrickX - 4,
                     ty * kBrickY - 1, z + storage_z_offset,
@@ -1895,13 +1980,28 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
     if (first_brick < brick_end)
         stage(first_brick, 0);
     for (int brick = first_brick; brick < brick_end; brick += args.shards) {
+        const int aggregate_x = wrap_offset(ox, (brick % bricks_x) * kBrickX, args.layout.nx);
+        const int aggregate_y = wrap_offset(oy, ((brick / bricks_x) % bricks_y) * kBrickY,
+                                            args.layout.ny);
+        const int local_z = (brick / bricks_per_plane) * kBrickZ;
+        const bool aggregate_bulk = bounded_z && local_z >= z_map.lo
+            && local_z + kBrickZ <= z_map.hi
+            && aggregate_x + kBrickX <= args.layout.nx
+            && aggregate_y + kBrickY <= args.layout.ny;
+        if (aggregate_bulk && threadIdx.x == 0)
+            load_tma_aggregate(&aggregate_map, aggregate_x & ~3, aggregate_y,
+                z_map.origin + local_z, shared_aggregate, &aggregate_ready);
         const bool more = brick + args.shards < brick_end;
         if (more)
             stage(brick + args.shards, 1 - parity);
         __pipeline_wait_prior(more ? 1 : 0);
-        if (bulk[parity]) {
-            wait_tma_halo(&ready[parity], phase[parity]);
-            phase[parity] ^= 1;
+        if (bulk_mask & (1u << parity)) {
+            wait_tma_halo(&ready[parity], (phase_mask >> parity) & 1u);
+            phase_mask ^= 1u << parity;
+        }
+        if (aggregate_bulk) {
+            wait_tma_halo(&aggregate_ready, aggregate_phase);
+            aggregate_phase ^= 1;
         }
         float* const shared_phi = parity == 0 ? halo0 : halo1;
         if (halo_any_nonzero<kTmaRowStride>(shared_phi)) {
@@ -1911,100 +2011,142 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
             const int x0 = bx * kBrickX;
             const int y0 = by * kBrickY;
             const int z0 = bz * kBrickZ;
-            constexpr int row_stride = kThreads3D / kBrickX;
-            static_assert(kBrickY == 2 * row_stride,
-                          "the paired walk must preserve each thread's reduction order");
-            const int ix = static_cast<int>(threadIdx.x) % kBrickX;
-            const int iy0 = static_cast<int>(threadIdx.x) / kBrickX;
-            const int iy1 = iy0 + row_stride;
-            const int x = x0 + ix;
-            const int y_first = y0 + iy0, y_second = y0 + iy1;
-            const bool first_valid = x < B && y_first < B;
-            const bool second_valid = x < B && y_second < B;
-            const int wx = wrap_offset(ox, x, args.layout.nx);
-            const std::size_t first_row = s_index(args.layout, wx,
-                wrap_offset(oy, y_first, args.layout.ny), 0);
-            const std::size_t second_row = s_index(args.layout, wx,
-                wrap_offset(oy, y_second, args.layout.ny), 0);
-            const std::size_t plane_words =
-                static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
-            const auto world_plane = [&](int iz) {
-                const int z = z0 + iz;
-                int wz = 0;
-                const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
-                    : aggregate_z(args.layout, origin_z, z, &wz);
-                return iz < kBrickZ && z < B && mapped ? wz : -1;
-            };
-            const auto prefetch_row = [&](std::size_t row, bool valid, int wz) {
-                return valid && wz >= 0
-                    ? load_aggregate_ahead(args.S + row
-                        + static_cast<std::size_t>(wz) * plane_words) : 0u;
-            };
-            const auto accumulate = [&](int iy, int y, bool valid, int iz,
-                                         int wz, std::uint32_t prefetched) {
-                if (!valid || wz < 0) return;
-                const int z = z0 + iz;
-                const float centre = shared_phi[halo_index<kTmaRowStride>(ix + 1, iy + 1,
-                                                           iz + 1)];
-                if (!isfinite(centre)) {
-                    raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
-                    return;
+            const auto visit_tile = [&](auto interior_tag) {
+                constexpr bool Interior = decltype(interior_tag)::value;
+                constexpr int row_stride = kThreads3D / kBrickX;
+                static_assert(kBrickY == row_stride || kBrickY == 2 * row_stride);
+                constexpr bool second_row_present = kBrickY == 2 * row_stride;
+                const int ix = static_cast<int>(threadIdx.x) % kBrickX;
+                const int iy0 = static_cast<int>(threadIdx.x) / kBrickX;
+                const int iy1 = iy0 + row_stride;
+                const int x = x0 + ix;
+                const int y_first = y0 + iy0, y_second = y0 + iy1;
+                const bool first_valid = Interior || (x < B && y_first < B);
+                const bool second_valid =
+                    second_row_present && (Interior || (x < B && y_second < B));
+                const int wx = wrap_offset(ox, x, args.layout.nx);
+                const std::size_t first_row =
+                    s_index(args.layout, wx, wrap_offset(oy, y_first, args.layout.ny), 0);
+                const std::size_t second_row =
+                    s_index(args.layout, wx, wrap_offset(oy, y_second, args.layout.ny), 0);
+                const std::size_t plane_words =
+                    static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
+                const auto world_plane = [&](int iz) {
+                    const int z = z0 + iz;
+                    if constexpr (Interior) {
+                        return iz < kBrickZ ? z_map.origin + z : -1;
+                    } else {
+                        int wz = 0;
+                        const bool mapped = bounded_z ? z_map.aggregate(z, &wz)
+                                                      : aggregate_z(args.layout, origin_z, z, &wz);
+                        return iz < kBrickZ && z < B && mapped ? wz : -1;
+                    }
+                };
+                const auto prefetch_row = [&](std::size_t row, bool valid, int wz,
+                                              [[maybe_unused]] int iy, [[maybe_unused]] int iz) {
+                    if (aggregate_bulk)
+                        return iz < kBrickZ
+                                   ? shared_aggregate[(iz * kBrickY + iy) * kAggregateRowStride +
+                                                      ix + (aggregate_x & 3)]
+                                   : 0u;
+                    return valid && wz >= 0
+                               ? load_aggregate_ahead(args.S + row +
+                                                      static_cast<std::size_t>(wz) * plane_words)
+                               : 0u;
+                };
+                double first_volume = 0.0, second_volume = 0.0;
+                unsigned first_max = 0, second_max = 0;
+                const auto accumulate = [&](int iy, int y, bool valid, int iz, int wz,
+                                            std::uint32_t prefetched) {
+                    if constexpr (!Interior)
+                        if (!valid || wz < 0)
+                            return;
+                    const int z = z0 + iz;
+                    const float centre =
+                        shared_phi[halo_index<kTmaRowStride>(ix + 1, iy + 1, iz + 1)];
+                    if (!isfinite(centre)) {
+                        raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
+                        return;
+                    }
+                    float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+                    gradient3<kTmaRowStride>(shared_phi, ix + 1, iy + 1, iz + 1, &gx, &gy, &gz);
+                    float other = other_field(prefetched, centre, state, args.global_flags);
+                    if constexpr (WallCoupling)
+                        other += weighted_wall_field<true>(args.wall, wz);
+                    const double square = static_cast<double>(centre) * static_cast<double>(centre);
+                    if (iy == iy0)
+                        first_volume += square;
+                    else
+                        second_volume += square;
+                    local.Cz += square * static_cast<double>(z);
+                    if constexpr (ComputeSurface)
+                        local.surface +=
+                            sqrt(static_cast<double>(gx) * gx + static_cast<double>(gy) * gy +
+                                 static_cast<double>(gz) * gz);
+                    const float interaction = centre * other;
+                    local.Ix += static_cast<double>(interaction * gx);
+                    local.Iy += static_cast<double>(interaction * gy);
+                    local.Iz += static_cast<double>(interaction * gz);
+                    if (iy == iy0)
+                        first_max = max(first_max, __float_as_uint(fabsf(centre)));
+                    else
+                        second_max = max(second_max, __float_as_uint(fabsf(centre)));
+                    if (fabsf(centre) > kSupportEps) {
+                        if constexpr (!Interior || !WallCoupling) {
+                            if (args.layout.substrate_slab() && wz == args.layout.nz - 1)
+                                raise_flag(state, args.global_flags, FLAG3D_SLAB_TOP_CONTACT);
+                        }
+                        local.lo_z = min(local.lo_z, z);
+                        local.hi_z = max(local.hi_z, z);
+                    }
+                };
+                // q=threadIdx.x+k*256 visits the two rows of each z plane in this
+                // order. Row sums reuse coordinate factors before the shard fold.
+                int wz = world_plane(0);
+                std::uint32_t first_aggregate = prefetch_row(first_row, first_valid, wz, iy0, 0);
+                std::uint32_t second_aggregate =
+                    second_row_present ? prefetch_row(second_row, second_valid, wz, iy1, 0) : 0u;
+#pragma unroll 1
+                for (int iz = 0; iz < kBrickZ; ++iz) {
+                    const int next_wz = world_plane(iz + 1);
+                    const std::uint32_t next_first =
+                        prefetch_row(first_row, first_valid, next_wz, iy0, iz + 1);
+                    accumulate(iy0, y_first, first_valid, iz, wz, first_aggregate);
+                    const std::uint32_t next_second =
+                        second_row_present
+                            ? prefetch_row(second_row, second_valid, next_wz, iy1, iz + 1)
+                            : 0u;
+                    if constexpr (second_row_present)
+                        accumulate(iy1, y_second, second_valid, iz, wz, second_aggregate);
+                    first_aggregate = next_first;
+                    second_aggregate = next_second;
+                    wz = next_wz;
                 }
-                float gx, gy, gz;
-                gradient3<kTmaRowStride>(shared_phi, ix + 1, iy + 1, iz + 1,
-                          &gx, &gy, &gz);
-                float other = centre != 0.0f
-                    ? other_field(prefetched, centre, state, args.global_flags)
-                    : 0.0f;
-                if constexpr (WallCoupling)
-                    other += weighted_wall_field<true>(
-                        args.wall, wz);
-                const double square = static_cast<double>(centre)
-                                    * static_cast<double>(centre);
-                local.V += square;
-                local.Cx += square * static_cast<double>(x);
-                local.Cy += square * static_cast<double>(y);
-                local.Cz += square * static_cast<double>(z);
-                if constexpr (ComputeSurface)
-                    local.surface += sqrt(static_cast<double>(gx) * gx
-                                        + static_cast<double>(gy) * gy
-                                        + static_cast<double>(gz) * gz);
-                local.Ix += static_cast<double>(centre * gx * other);
-                local.Iy += static_cast<double>(centre * gy * other);
-                local.Iz += static_cast<double>(centre * gz * other);
-                local.phi_max_bits = max(local.phi_max_bits,
-                                         __float_as_uint(fabsf(centre)));
-                if (fabsf(centre) > kSupportEps) {
-                    if (args.layout.substrate_slab() &&
-                        wz == args.layout.nz - 1)
-                        raise_flag(state, args.global_flags,
-                                   FLAG3D_SLAB_TOP_CONTACT);
+                local.V += first_volume + second_volume;
+                local.Cx += (first_volume + second_volume) * static_cast<double>(x);
+                local.Cy += first_volume * static_cast<double>(y_first) +
+                            second_volume * static_cast<double>(y_second);
+                const unsigned max_bits = max(first_max, second_max);
+                local.phi_max_bits = max(local.phi_max_bits, max_bits);
+                if (__uint_as_float(max_bits) > kSupportEps) {
                     local.lo_x = min(local.lo_x, x);
                     local.hi_x = max(local.hi_x, x);
-                    local.lo_y = min(local.lo_y, y);
-                    local.hi_y = max(local.hi_y, y);
-                    local.lo_z = min(local.lo_z, z);
-                    local.hi_z = max(local.hi_z, z);
+                }
+                if (__uint_as_float(first_max) > kSupportEps) {
+                    local.lo_y = min(local.lo_y, y_first);
+                    local.hi_y = max(local.hi_y, y_first);
+                }
+                if (__uint_as_float(second_max) > kSupportEps) {
+                    local.lo_y = min(local.lo_y, y_second);
+                    local.hi_y = max(local.hi_y, y_second);
                 }
             };
-            // q=threadIdx.x+k*256 visits the two rows of each z plane in this
-            // order. Keeping that order preserves the stored moment grouping.
-            int wz = world_plane(0);
-            std::uint32_t first_aggregate = prefetch_row(first_row, first_valid, wz);
-            std::uint32_t second_aggregate = prefetch_row(second_row, second_valid, wz);
-#pragma unroll 1
-            for (int iz = 0; iz < kBrickZ; ++iz) {
-                const int next_wz = world_plane(iz + 1);
-                const std::uint32_t next_first =
-                    prefetch_row(first_row, first_valid, next_wz);
-                accumulate(iy0, y_first, first_valid, iz, wz, first_aggregate);
-                const std::uint32_t next_second =
-                    prefetch_row(second_row, second_valid, next_wz);
-                accumulate(iy1, y_second, second_valid, iz, wz, second_aggregate);
-                first_aggregate = next_first;
-                second_aggregate = next_second;
-                wz = next_wz;
-            }
+            const bool interior = bounded_z && x0 + kBrickX <= B && y0 + kBrickY <= B &&
+                                  z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi;
+            if (interior)
+                visit_tile(std::true_type{});
+            else
+                visit_tile(std::false_type{});
         }
         // A fallback tile may use generic zero stores. Publish them to the
         // async proxy before this buffer can receive a later bulk transfer.
@@ -2018,6 +2160,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
         args.partials[static_cast<std::size_t>(n) * args.shards + shard] = total;
     }
 }
+
 
 __global__ void k_finalize_measure_cell_shards(MeasureArgs3D args) {
     const int slot = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -2161,11 +2304,15 @@ void k_update_tiled_sharded_impl(UpdateArgs3D args,
         args.B, partials, halo_pair, warp_values, &abort_flag);
 }
 
-template <bool WallCoupling, UpdateTilePass3D Pass = UpdateTilePass3D::All>
+template <bool WallCoupling, UpdateTilePass3D Pass = UpdateTilePass3D::All,
+          int FixedEdge = 0, bool BoundedAggregate = false, bool InputsMeasured = false>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_update_tiled_sharded_fast_impl(UpdateArgs3D args,
                                       int shards_per_cell,
                                       const __grid_constant__ CUtensorMap tensor_map) {
+    // Do not modify the parameter record: indexed exchange bounds can otherwise
+    // force a per-thread local-memory copy of the whole record.
+    const int B = FixedEdge != 0 ? FixedEdge : args.B;
     extern __shared__ __align__(128) float tma_update_halo_pair[];
     __shared__ __align__(8) unsigned long long ready[2];
     __shared__ int abort_flag;
@@ -2175,21 +2322,20 @@ void k_update_tiled_sharded_fast_impl(UpdateArgs3D args,
     const int shard = block - slot * shards_per_cell;
     if (slot >= args.selection.selected_count(args.N)) return;
     const int n = args.selection.cell_index(slot);
-    if (cell_is_promoted(args.cells[n], args.B)) return;
-    const std::size_t words = stored_cell_words(args.B, args.storage);
-    process_update_shard<false, WallCoupling, Pass, true, true>(
+    if (cell_is_promoted(args.cells[n], B)) return;
+    const std::size_t words = stored_cell_words(B, args.storage);
+    process_update_shard<false, WallCoupling, Pass, true, true, BoundedAggregate, InputsMeasured>(
         n, shard, shards_per_cell, args,
         args.phi_in + static_cast<std::size_t>(n) * words,
         args.phi_out + static_cast<std::size_t>(n) * words,
-        args.B, nullptr, tma_update_halo_pair, nullptr, &abort_flag,
+        B, nullptr, tma_update_halo_pair, nullptr, &abort_flag,
         &output_complete, &tensor_map, ready);
 }
 
 // The promoted throughput update splits every pointer-backed cube among
 // shards_per_cell CTAs with the same deterministic tile assignment as the
 // base sharded update: tile t belongs to t % shards_per_cell.  The phase
-// arithmetic is process_update_shard's, so outputs are bit-identical to the
-// one-CTA promoted update; the destination cubes must be cleared first
+// arithmetic shares the base update's stencil; the destination cubes are cleared first
 // because shards skip absent voxels instead of zero-filling.
 __global__ void k_clear_promoted_out(UpdateArgs3D args,
                                      float* const* promoted_phi_out,
@@ -2868,6 +3014,12 @@ cudaError_t configure_current_tile_kernels() {
     const void* const bulk_copy_kernels[] = {
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 160>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 160>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Boundary, 160, false, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Interior, 160, false, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 0, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 160, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
             false, UpdateTilePass3D::Boundary>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
@@ -2949,6 +3101,41 @@ void enqueue_base_fast_pass(const UpdateArgs3D& args, int count,
                             int shards_per_cell, const CUtensorMap& tensor_map,
                             cudaStream_t stream) {
     const int blocks = count * shards_per_cell;
+    if constexpr (WallCoupling) {
+        if (args.aggregate_bound) {
+            if (args.B == 160)
+                k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 160, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
+                        args, shards_per_cell, tensor_map);
+            else
+                k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 0, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
+                        args, shards_per_cell, tensor_map);
+            return;
+        }
+    }
+    if constexpr (WallCoupling) {
+        // The same-stream measurement has checked these immutable inputs.
+        // Separate instantiations avoid retaining both check paths in registers.
+        if (args.B == 160 && args.inputs_measured) {
+            if (args.tile_pass == UpdateTilePass3D::Boundary) {
+                k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Boundary, 160, false, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards_per_cell, tensor_map);
+                return;
+            }
+            if (args.tile_pass == UpdateTilePass3D::Interior) {
+                k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Interior, 160, false, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards_per_cell, tensor_map);
+                return;
+            }
+        }
+    }
+    if (args.B == 160 && args.tile_pass == UpdateTilePass3D::All) {
+        k_update_tiled_sharded_fast_impl<WallCoupling, UpdateTilePass3D::All, 160>
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
+                args, shards_per_cell, tensor_map);
+        return;
+    }
     if (args.tile_pass == UpdateTilePass3D::Boundary)
         k_update_tiled_sharded_fast_impl<WallCoupling,
                                          UpdateTilePass3D::Boundary>
@@ -3061,15 +3248,20 @@ bool launch_check_promoted_crops(
 }
 
 template <bool WallCoupling, bool ComputeSurface>
-void enqueue_base_measurement(const MeasureArgs3D& args, int count,
+bool enqueue_base_measurement(const MeasureArgs3D& args, int count,
                               const CUtensorMap& tensor_map, cudaStream_t stream) {
+    CUtensorMap aggregate_map{};
+    if (!aggregate_tensor_map(args.S, args.layout, &aggregate_map)) return false;
     // Specializing the common 160-voxel brick folds integer tile indexing.
     if (args.B == 160)
         k_measure_cell_shards_impl<WallCoupling, ComputeSurface, 160>
-            <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(args, tensor_map);
+            <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
+                args, tensor_map, aggregate_map);
     else
         k_measure_cell_shards_impl<WallCoupling, ComputeSurface>
-            <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(args, tensor_map);
+            <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
+                args, tensor_map, aggregate_map);
+    return true;
 }
 
 bool launch_measure_cells_only(const MeasureArgs3D& args,
@@ -3090,14 +3282,16 @@ bool launch_measure_cells_only(const MeasureArgs3D& args,
         CUtensorMap tensor_map{};
         if (!field_tensor_map(args.phi, args.B, args.storage.planes(args.B),
                               args.N, &tensor_map)) return false;
+        bool enqueued = false;
         if (wall_coupling && args.compute_surface)
-            enqueue_base_measurement<true, true>(args, count, tensor_map, stream);
+            enqueued = enqueue_base_measurement<true, true>(args, count, tensor_map, stream);
         else if (wall_coupling)
-            enqueue_base_measurement<true, false>(args, count, tensor_map, stream);
+            enqueued = enqueue_base_measurement<true, false>(args, count, tensor_map, stream);
         else if (args.compute_surface)
-            enqueue_base_measurement<false, true>(args, count, tensor_map, stream);
+            enqueued = enqueue_base_measurement<false, true>(args, count, tensor_map, stream);
         else
-            enqueue_base_measurement<false, false>(args, count, tensor_map, stream);
+            enqueued = enqueue_base_measurement<false, false>(args, count, tensor_map, stream);
+        if (!enqueued) return false;
         k_finalize_measure_cell_shards<<<(count + 127) / 128,
                                          128, 0, stream>>>(args);
     } else {
@@ -3403,6 +3597,9 @@ bool launch_update_tiled_sharded_fast(const UpdateArgs3D& args,
                                       int shards_per_cell,
                                       cudaStream_t stream) {
     const bool partial = args.tile_pass != UpdateTilePass3D::All;
+    if (args.aggregate_bound && (partial || args.selection.ids ||
+        !args.layout.hard_wall_channel() || args.B >= args.layout.nx ||
+        args.B >= args.layout.ny)) return false;
     if (!valid_update_partition(args) || (partial && shards_per_cell < 1)
         || args.N <= 0 || !args.selection.valid(args.N)) return false;
     const int count = args.selection.selected_count(args.N);

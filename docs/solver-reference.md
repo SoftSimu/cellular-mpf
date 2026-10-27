@@ -167,6 +167,14 @@ The logical payload remains cubic even when bounded-z GPU allocations omit
 exterior planes; height-matched storage saves device memory, not checkpoint
 disk space.
 
+The optimized 3D kernels reuse stencil and moment intermediates and move
+interior bounds decisions outside voxel loops. The stencil weights, time step
+and precision are unchanged; regrouping floating-point operations can change
+roundoff between builds. The complete single-GPU channel update also bounds
+base-cell overlap before accumulating the integer interaction field. Values
+outside that bound use checked additions, as do promoted cells and partitioned
+two-GPU updates. Fatal integrity checks and checkpoint formats are unchanged.
+
 Repeated continuations preserve the tumble stream with the same accepted
 step, stable IDs, seeds and parameters. Pin source, compiler and executable
 for long trajectories; no cross-architecture bitwise identity is promised.
@@ -194,7 +202,10 @@ ctest --test-dir build -C Release --output-on-failure
 Add `-DPF_ENABLE_GPU_TESTS=ON` to register the 2D and 3D output/restart smokes.
 If `PF_BUILD_TWO_GPU_SUBSTRATE` is also enabled, the two-device smoke compares
 channel checkpoints, trajectories and contour samples with the single-device
-solver and exercises active tumbles and split continuation. These tests run on
+solver and exercises active tumbles and split continuation. Across device
+counts, the five-step test permits floating-point roundoff in fields and
+measurements; IDs, polarity, counters and contour samples must match exactly.
+The same two-device executable must restart byte-identically. These tests run on
 the caller's GPU allocation; they never submit cluster jobs themselves.
 
 For the optional contour/contact tests, install
