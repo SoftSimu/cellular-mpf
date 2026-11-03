@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Cellular MPF
+#
+# Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# See LICENSE.txt and COPYING for the license terms.
+
 """Measure 3D surface proximity, then track persistent graph changes offline.
 
 The two subcommands deliberately separate costly geometry from threshold and

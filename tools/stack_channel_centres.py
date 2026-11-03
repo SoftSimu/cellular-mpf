@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Cellular MPF
+#
+# Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# See LICENSE.txt and COPYING for the license terms.
+
 """Build fresh stacked-channel positions from passive one-layer checkpoints.
 
 Only checkpoint metadata and cell records are read; phase fields are not copied

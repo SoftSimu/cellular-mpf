@@ -1,3 +1,12 @@
+/*
+ * Cellular MPF
+ *
+ * Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * See LICENSE.txt and COPYING for the license terms.
+ */
+
 #include "pf3d/sim.cuh"
 #include "pf3d/brick_classes.hpp"
 

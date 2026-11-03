@@ -1,3 +1,12 @@
+/*
+ * Cellular MPF
+ *
+ * Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * See LICENSE.txt and COPYING for the license terms.
+ */
+
 // Host orchestration for initialization, ordered CUDA updates, checkpointing,
 // and diagnostics. Captured graphs cover the two phi buffers, three
 // aggregate-field buffers, and optional spatial-observation cadence.

@@ -1,3 +1,12 @@
+/*
+ * Cellular MPF
+ *
+ * Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * See LICENSE.txt and COPYING for the license terms.
+ */
+
 // Fully periodic fast update: one CTA per cell walks y-strips through a four-plane
 // shared-memory ring while cp.async loads the next plane. A register stencil
 // reduces shared loads from 27 to 9 per voxel. Every destination is written

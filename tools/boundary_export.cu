@@ -1,3 +1,12 @@
+/*
+ * Cellular MPF
+ *
+ * Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * See LICENSE.txt and COPYING for the license terms.
+ */
+
 // Exercise boundary output from saved states without launching the time-step kernel.
 #include "boundary.cuh"
 #include "checkpoint.cuh"

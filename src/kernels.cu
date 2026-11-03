@@ -1,3 +1,12 @@
+/*
+ * Cellular MPF
+ *
+ * Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * See LICENSE.txt and COPYING for the license terms.
+ */
+
 // CUDA kernels for the phase-field update. One persistent queue handles every
 // cell, including the global-memory fallback, within the same step launch.
 

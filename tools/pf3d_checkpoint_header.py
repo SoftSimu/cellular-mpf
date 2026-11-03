@@ -1,3 +1,10 @@
+# Cellular MPF
+#
+# Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# See LICENSE.txt and COPYING for the license terms.
+
 """Fixed header contract shared by PF3D Python tools."""
 
 from __future__ import annotations

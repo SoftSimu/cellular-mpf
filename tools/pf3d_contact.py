@@ -1,3 +1,10 @@
+# Cellular MPF
+#
+# Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# See LICENSE.txt and COPYING for the license terms.
+
 """Geometric proximity patches on recorded three-dimensional cell interfaces.
 
 This is an observation definition, not an adhesion law. Gap and area thresholds

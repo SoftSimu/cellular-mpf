@@ -1,3 +1,12 @@
+/*
+ * Cellular MPF
+ *
+ * Copyright (C) 2026 Steven A. Silber and Mikko Karttunen
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * See LICENSE.txt and COPYING for the license terms.
+ */
+
 // Binary checkpoint I/O for the sole supported 2D schema. Record layouts are
 // defined in common/checkpoint_format.h. A file records one tile pitch and one
 // fixed-size phase-field tile per cell.
