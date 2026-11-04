@@ -1026,10 +1026,10 @@ bool Sim3D::initialize_fields() {
             if (header == "global_id,x,y") {
                 const int one_layer_height = static_cast<int>(
                     std::ceil(2.0 * params_.target_radius));
-                if (params_.accessible_channel_height() != one_layer_height) {
+                if (params_.accessible_channel_height() > one_layer_height) {
                     std::fprintf(stderr,
                         "[3d] a 2D relaxed x/y table is accepted only for the "
-                        "one-layer channel H=ceil(2R)=%d; use an id,x,y,z "
+                        "one-layer channel H<=ceil(2R)=%d; use an id,x,y,z "
                         "table for multilayer initialization\n",
                         one_layer_height);
                     return false;
@@ -1044,7 +1044,7 @@ bool Sim3D::initialize_fields() {
                     return false;
                 }
                 z.assign(x.size(),
-                         static_cast<float>(0.5 * one_layer_height));
+                         static_cast<float>(0.5 * params_.accessible_channel_height()));
                 initialization_hash = centre_table_fnv1a64(
                     global_id, x, y, z);
                 std::printf(

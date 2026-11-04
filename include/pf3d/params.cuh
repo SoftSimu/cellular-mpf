@@ -416,9 +416,6 @@ inline bool validate(const SimParams3D& p, const char** error = nullptr) {
             2 * static_cast<std::int64_t>(p.channel_padding);
         if (allocated_height != p.Nz)
             return fail("channel Nz must equal H + 2*padding");
-        const double diameter = std::ceil(2.0 * p.target_radius);
-        if (!std::isfinite(diameter) || p.channel_height < diameter)
-            return fail("accessible channel height is smaller than one cell diameter");
     } else if (p.channel_height != 0 || p.channel_padding != 0 ||
                p.wall_kappa != 0.0 || p.wall_width != 0.0) {
         return fail("wall parameters require the hard-wall channel geometry");

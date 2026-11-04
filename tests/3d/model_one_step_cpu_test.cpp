@@ -8,6 +8,7 @@
  */
 
 #include "pf3d/reference.hpp"
+#include "pf3d/palmieri_initializer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -468,6 +469,56 @@ void test_periodic_translation() {
     }
 }
 
+void test_channel_placement_below_diameter() {
+    pf3d::SimParams3D params;
+    params.Nx = params.Ny = 1830;
+    params.Nz = 134;
+    params.num_cells = 400;
+    params.boundary_flags = pf3d::kBoundaryHardWallChannel3D;
+    params.channel_height = 92;
+    params.channel_padding = 21;
+    params.wall_width = 7.0;
+    params.wall_kappa = 10.0;
+    params.rho = 0.64;
+    params.xi = 73500.0;
+    expect(pf3d::validate(params), "resolved channel validation accepts H below 2R");
+    expect(close(params.realized_rho(), 0.6398038276071365),
+           "packing uses the physical gap, not solid padding");
+    params.channel_padding = 20;
+    expect(!pf3d::validate(params), "thin channels retain the wall-padding guard");
+    std::vector<float> x, y, z, repeated_x, repeated_y, repeated_z;
+    pf3d::PalmieriInit3DDiagnostics diagnostics{};
+    pf3d::channel3d_sequential_centres(
+        400, 1830.0, 92, 49.0, 261104401, &x, &y, &z, &diagnostics);
+    pf3d::channel3d_sequential_centres(
+        400, 1830.0, 92, 49.0, 261104401,
+        &repeated_x, &repeated_y, &repeated_z, nullptr);
+    expect(x == repeated_x && y == repeated_y && z == repeated_z,
+           "thin-channel placement is deterministic");
+    expect(std::all_of(z.begin(), z.end(), [](float value) { return value == 46.0f; }),
+           "sub-diameter channel starts in its midplane");
+    std::string error;
+    expect(pf3d::channel3d_validate_centres(
+               x, y, z, 400, 1830.0, 92, 49.0, nullptr, &error),
+           "thin-channel centre table preserves periodic minimum separation");
+    z[1] = 49.0f;
+    expect(!pf3d::channel3d_validate_centres(
+               x, y, z, 400, 1830.0, 92, 49.0, nullptr, &error),
+           "thin-channel fresh centres cannot drift off the prescribed midplane");
+    pf3d::channel3d_sequential_centres(
+        8, 400.0, 98, 49.0, 123, &x, &y, &z, nullptr);
+    expect(std::all_of(z.begin(), z.end(), [](float value) { return value == 49.0f; }),
+           "one-diameter placement retains its original height");
+    bool rejected = false;
+    try {
+        pf3d::channel3d_sequential_centres(
+            8, 400.0, 0, 49.0, 123, &x, &y, &z, nullptr);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    expect(rejected, "non-positive channel heights remain invalid");
+}
+
 }  // namespace
 
 int main() {
@@ -480,6 +531,7 @@ int main() {
     test_pair_repulsion_and_permutations();
     test_no_overlap_and_exact_subtraction();
     test_periodic_translation();
+    test_channel_placement_below_diameter();
     if (failures != 0) {
         std::fprintf(stderr, "%d 3-D one-step CPU-reference test(s) failed\n",
                      failures);

@@ -801,13 +801,6 @@ bool resolve_fresh_geometry(ParsedCommand* command) {
         }
         bounded_height = command->channel_height_supplied
             ? command->channel_height : static_cast<int>(diameter);
-        if (bounded_height < static_cast<int>(diameter)) {
-            std::fprintf(stderr,
-                "[3d] channel height %d is smaller than the supported "
-                "one-diameter minimum %d\n",
-                bounded_height, static_cast<int>(diameter));
-            return false;
-        }
     }
 
     const int side = params.substrate_slab()

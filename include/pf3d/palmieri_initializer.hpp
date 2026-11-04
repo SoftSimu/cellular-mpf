@@ -354,14 +354,14 @@ inline bool palmieri3d_read_centres_csv(
 // Hard-wall channel placement uses the same reproducible random stream and
 // minimum centre separation as the periodic initializer. x/y use minimum-image
 // distances; z is height above the lower physical wall and lies between the
-// wall mid-surfaces at 0 and H. The nominal-radius clearance defines placement;
-// the calibrated diffuse seed can extend slightly into the smooth wall field.
+// wall mid-surfaces at 0 and H. For H < 2R, centres occupy the midplane;
+// the diffuse seeds overlap the walls and relax during passive preparation.
 inline void channel3d_sequential_centres(
     int n, double side, int height, double radius, std::uint64_t seed,
     std::vector<float>* x, std::vector<float>* y, std::vector<float>* z,
     PalmieriInit3DDiagnostics* diag) {
-    const double z_min = radius;
-    const double z_max = static_cast<double>(height) - radius;
+    const double z_min = std::min(radius, 0.5 * static_cast<double>(height));
+    const double z_max = static_cast<double>(height) - z_min;
     if (!x || !y || !z || n < 1 || !(side > 0.0) || !(radius > 0.0) ||
         height <= 0 || z_max < z_min)
         throw std::runtime_error("invalid hard-wall channel initializer parameters");
@@ -442,13 +442,8 @@ inline bool channel3d_validate_centres(
                              "global_id 0 is not exactly at the channel centre");
         return false;
     }
-    const double z_min = radius;
-    const double z_max = static_cast<double>(height) - radius;
-    if (z_max < z_min) {
-        palmieri3d_set_error(error,
-                             "channel height is smaller than one cell diameter");
-        return false;
-    }
+    const double z_min = std::min(radius, 0.5 * static_cast<double>(height));
+    const double z_max = static_cast<double>(height) - z_min;
     for (int i = 0; i < expected_n; ++i) {
         const std::size_t k = static_cast<std::size_t>(i);
         if (!std::isfinite(x[k]) || !std::isfinite(y[k]) ||

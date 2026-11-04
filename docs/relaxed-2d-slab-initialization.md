@@ -124,8 +124,16 @@ the source `Lx` exactly. For `H=2R`, the continuum relation is
 `rho_V=0.6`, not `0.9`. PF3D checks the CSV's `source_L` against its derived
 lateral box, transfers only
 IDs/x/y, places fresh spheres at `z=H/2`, and then relaxes them in 3D. This
-path is restricted to `H=ceil(2R)` and must not be copied into multiple z
+path accepts `H<=ceil(2R)` and must not be copied into multiple z
 layers; multilayer channels use genuine `global_id,x,y,z` initialization.
+
+For a gap narrower than a nominal cell diameter, initial centres lie at
+`z=H/2`. The existing diffuse-sphere seed then overlaps the resolved wall
+field and deforms during passive preparation. The target cell volume,
+wall forces and evolution equations are unchanged. Inspect the relaxed
+volume and wall overlap before starting active measurements. The exporter's
+default recommendation remains `H=ceil(2R)`; recompute the volume fraction
+when choosing a different height while preserving the lateral box.
 
 ## Stacked channel arrangements
 
