@@ -27,9 +27,11 @@ struct BoundedZMap {
     int origin = 0;
     bool reflect_lower = false;
     bool reflect_upper = false;
+    bool odd_upper = false;
 
     PF3D_ZMAP_HD static constexpr BoundedZMap make(
-        std::int64_t origin_z, int B, int nz, bool channel) {
+        std::int64_t origin_z, int B, int nz, bool upper_reflect,
+        bool upper_odd = false) {
         BoundedZMap map;
         if (B <= 0 || nz <= 0 || origin_z >= static_cast<std::int64_t>(nz)
             || origin_z <= -static_cast<std::int64_t>(B)) return map;
@@ -42,7 +44,8 @@ struct BoundedZMap {
         map.hi = static_cast<int>(end < B ? end : B);
         map.origin = static_cast<int>(origin_z);
         map.reflect_lower = origin_z <= 0;
-        map.reflect_upper = channel && origin_z + static_cast<std::int64_t>(B) >= nz;
+        map.reflect_upper = upper_reflect && origin_z + static_cast<std::int64_t>(B) >= nz;
+        map.odd_upper = upper_odd;
         return map;
     }
 
@@ -56,7 +59,8 @@ struct BoundedZMap {
 
     // Accept arbitrary local offsets. Only the single reflected ghost next
     // to each enabled domain face aliases a real plane inside this brick.
-    PF3D_ZMAP_HD constexpr bool fetch(int requested_z, int* source_z) const {
+    // Return 0 for a zero halo, +1 for a copy, -1 for a Dirichlet odd ghost.
+    PF3D_ZMAP_HD constexpr int fetch(int requested_z, int* source_z) const {
         if (requested_z >= lo && requested_z < hi) {
             *source_z = requested_z;
             return true;
@@ -67,7 +71,7 @@ struct BoundedZMap {
         }
         if (reflect_upper && requested_z == hi) {
             *source_z = hi - 1;
-            return true;
+            return odd_upper ? -1 : 1;
         }
         return false;
     }

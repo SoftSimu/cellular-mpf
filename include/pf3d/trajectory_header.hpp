@@ -36,7 +36,7 @@ inline std::string trajectory_header(const SimParams3D& p, int B,
             "# phase_field_gh200 trajectory schema=1 dim=3 geometry=substrate-slab "
             "boundary=periodic-xy N=%d Nx=%d Ny=%d Nz=%d B=%d "
             "z_coordinate=height-above-substrate substrate_z=0 "
-            "lattice_substrate_face=%a top=dirichlet-zero top_z=%d translation=planar "
+            "lattice_substrate_face=%a top=%s top_z=%d translation=planar "
             "dx=%a dt=%a aging_time=%a rho_A_target=%a rho_A_realized=%a "
             "R=%a lambda=%a kappa=%a mu=%a xi=%a "
             "tau=%a v_A=%a v_A_sigma=%a gamma_normal=%a gamma_soft=%a "
@@ -44,7 +44,10 @@ inline std::string trajectory_header(const SimParams3D& p, int B,
             "promoted_measure_reduction=%s promoted_measure_policy=%d "
             "promoted_measure_auto_wave_ctas=%d base_measure_shards=%d "
             "trajectory_interval=%llu",
-            p.num_cells, p.Nx, p.Ny, p.Nz, B, -0.5, p.Nz, p.dx, p.dt,
+            p.num_cells, p.Nx, p.Ny, p.Nz, B, -0.5,
+            (p.boundary_flags & kBoundaryLid3D) ? "dirichlet-face" :
+            (p.boundary_flags & kBoundaryNeutralTop3D) ? "neumann" : "dirichlet-zero",
+            p.Nz, p.dx, p.dt,
             p.aging_time, p.rho, p.realized_rho(), p.target_radius, p.lambda,
             p.kappa, p.mu,
             p.xi, p.tau, p.v_A, p.v_A_sigma, p.gamma_normal,
@@ -104,9 +107,15 @@ inline std::string trajectory_header(const SimParams3D& p, int B,
             promoted_measure_auto_wave_ctas, base_measure_shards,
             static_cast<unsigned long long>(trajectory_interval));
     }
-    return written > 0 && static_cast<std::size_t>(written) < sizeof(text)
-        ? std::string(text, static_cast<std::size_t>(written))
-        : std::string();
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(text)) return {};
+    std::string result(text, static_cast<std::size_t>(written));
+    if (p.phase_field_mobility != 0.5 || p.reference_height != 0.0) {
+        char extension[160];
+        std::snprintf(extension, sizeof(extension), " M=%a reference_height=%a V0=%a",
+                      p.phase_field_mobility, p.reference_height, p.volume0());
+        result += extension;
+    }
+    return result;
 }
 
 // Both metadata and column strings must match before an existing file is extended.

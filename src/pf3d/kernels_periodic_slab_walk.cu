@@ -112,7 +112,7 @@ void k_update_periodic_slab_walk_fast(UpdateArgs3D args) {
     const int shift_x = state->pending_shift_x;
     const int shift_y = state->pending_shift_y;
     const int shift_z = state->pending_shift_z;
-    const float gamma = state->gamma;
+    const float gamma = state->gamma * args.mobility_scale;
     const float velocity_x = state->velocity_x;
     const float velocity_y = state->velocity_y;
     const float velocity_z = state->velocity_z;

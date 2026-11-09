@@ -1169,14 +1169,47 @@ bool Sim3D::initialize_fields() {
 
     reference::SeedRadiusCalibration calibration{};
     try {
+        const double equivalent_radius = params_.reference_height > 0.0
+            ? std::cbrt(1.5 * params_.reference_height *
+                        params_.target_radius * params_.target_radius)
+            : params_.target_radius;
         calibration = reference::calibrate_seed_radius(
-            params_.target_radius, params_.lambda, B_);
+            equivalent_radius, params_.lambda, B_);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "[3d] sphere-radius calibration failed: %s\n",
                      error.what());
         return false;
     }
-    const double seed_radius = calibration.seed_radius;
+    double seed_radius = calibration.seed_radius;
+    const bool column = (params_.boundary_flags & kBoundaryNeutralTop3D) != 0;
+    if (column) {
+        if (params_.Nz > B_ - 4) {
+            std::fprintf(stderr, "[3d] a uniform reference column requires B >= Nz+4\n");
+            return false;
+        }
+        const double area = params_.volume0() / params_.Nz;
+        double lo = 0.0, hi = 0.5 * (B_ - 4);
+        const double k = interface_k(params_.lambda);
+        for (int iteration = 0; iteration < 50; ++iteration) {
+            const double trial = 0.5 * (lo + hi);
+            double measured = 0.0;
+            for (int y = 0; y < B_; ++y)
+                for (int x = 0; x < B_; ++x) {
+                    const double dx = x - 0.5 * (B_ - 1);
+                    const double dy = y - 0.5 * (B_ - 1);
+                    const double phi = 0.5 * (1.0 - std::tanh(k *
+                        (std::sqrt(dx*dx + dy*dy) - trial)));
+                    measured += phi * phi;
+                }
+            if (measured < area) lo = trial;
+            else hi = trial;
+        }
+        seed_radius = 0.5 * (lo + hi);
+        for (auto& centre : centres) centre.z = 0.5 * (params_.Nz - 1);
+        if (!gpu_ok(cudaMemcpyAsync(d_centres_, centres.data(),
+                    centres.size() * sizeof(Vec3), cudaMemcpyHostToDevice, stream_),
+                    "copy column centres")) return false;
+    }
     if (!calibration.converged || !(seed_radius > 0.0) ||
         !std::isfinite(seed_radius)) {
         std::fprintf(stderr,
@@ -1195,6 +1228,7 @@ bool Sim3D::initialize_fields() {
     init.layout = layout_;
     init.lambda = static_cast<float>(params_.lambda);
     init.seed_radius = static_cast<float>(seed_radius);
+    init.column = column;
     init.storage = field_storage_;
     launch_initialize_spheres(init, stream_);
     if (!gpu_ok(cudaGetLastError(), "initialize-spheres launch")) return false;
@@ -1573,9 +1607,11 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     update.selection = selection_;
     update.dt = static_cast<float>(params_.dt);
     update.V0 = params_.volume0();
-    update.volume_scale = params_.volume();
+    update.mobility_scale = static_cast<float>(2.0 * params_.phase_field_mobility);
+    update.volume_scale = params_.volume() * (2.0 * params_.phase_field_mobility);
     update.bulk_scale = static_cast<float>(params_.bulk());
-    update.interaction_coeff = static_cast<float>(params_.interaction());
+    update.interaction_coeff = static_cast<float>(params_.interaction() *
+                                                  (2.0 * params_.phase_field_mobility));
     // Surface does not enter the evolution equations. It is measured only at
     // its requested cadence or before output that requires it.
     update.compute_surface = false;

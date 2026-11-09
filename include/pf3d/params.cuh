@@ -36,6 +36,8 @@ constexpr std::uint32_t kBoundaryPeriodicX3D = 1u << 0;
 constexpr std::uint32_t kBoundaryPeriodicY3D = 1u << 1;
 constexpr std::uint32_t kBoundaryPeriodicZ3D = 1u << 2;
 constexpr std::uint32_t kBoundaryChannelZ3D = 1u << 3;
+constexpr std::uint32_t kBoundaryNeutralTop3D = 1u << 4;
+constexpr std::uint32_t kBoundaryLid3D = 1u << 5;
 constexpr std::uint32_t kBoundaryPeriodicXYZ3D =
     kBoundaryPeriodicX3D | kBoundaryPeriodicY3D | kBoundaryPeriodicZ3D;
 constexpr std::uint32_t kBoundarySubstrateSlab3D =
@@ -43,9 +45,14 @@ constexpr std::uint32_t kBoundarySubstrateSlab3D =
 constexpr std::uint32_t kBoundaryHardWallChannel3D =
     kBoundaryPeriodicX3D | kBoundaryPeriodicY3D | kBoundaryChannelZ3D;
 
-// These are the Palmieri coefficients after including mobility M = 1/2.
-// Their form is independent of spatial dimension; only the target measure
-// changes from cell area to cell volume.
+PF3D_HD constexpr bool is_substrate_slab(std::uint32_t flags) {
+    return flags == kBoundarySubstrateSlab3D ||
+           flags == (kBoundarySubstrateSlab3D | kBoundaryNeutralTop3D) ||
+           flags == (kBoundarySubstrateSlab3D | kBoundaryLid3D);
+}
+
+// Passive coefficients include the reference mobility 1/2. Stepping scales
+// them by 2M; the separate translational coefficient does not depend on M.
 using pf_common::bulk_coeff;
 using pf_common::interaction_coeff;
 using pf_common::kNumerBulk;
@@ -295,6 +302,9 @@ struct SimParams3D {
     double wall_kappa = 0.0;
     double wall_width = 0.0;
     double mu = 1.0;
+    double phase_field_mobility = 0.5;
+    // Zero retains the hemispherical target; positive h sets V0=h*pi*R^2.
+    double reference_height = 0.0;
     double xi = 1500.0;
     double tau = 1.0e4;
     double v_A = 1.0e-2;
@@ -312,7 +322,7 @@ struct SimParams3D {
         return polarity_seed ? polarity_seed : seed;
     }
     PF3D_HD bool substrate_slab() const {
-        return boundary_flags == kBoundarySubstrateSlab3D;
+        return is_substrate_slab(boundary_flags);
     }
     PF3D_HD bool hard_wall_channel() const {
         return boundary_flags == kBoundaryHardWallChannel3D;
@@ -334,9 +344,11 @@ struct SimParams3D {
     }
     PF3D_HD int minimum_domain_edge() const {
         const int xy = Nx < Ny ? Nx : Ny;
-        return hard_wall_channel() ? xy : (xy < Nz ? xy : Nz);
+        return bounded_z() ? xy : (xy < Nz ? xy : Nz);
     }
     PF3D_HD double volume0() const {
+        if (reference_height > 0.0)
+            return reference_height * target_slab_footprint_area(target_radius);
         return substrate_slab() ? target_slab_volume(target_radius)
                                 : target_sphere_volume(target_radius);
     }
@@ -371,7 +383,10 @@ struct SimParams3D {
             ? static_cast<long long>(steps) : -1LL;
     }
     int brick_edge() const {
-        return automatic_brick_edge(target_radius, lambda);
+        const double seed_radius = reference_height > 0.0
+            ? std::cbrt(1.5 * reference_height * target_radius * target_radius)
+            : target_radius;
+        return automatic_brick_edge(seed_radius, lambda);
     }
     long long total_steps() const {
         const double steps = t_end / dt + 0.5;
@@ -421,6 +436,11 @@ inline bool validate(const SimParams3D& p, const char** error = nullptr) {
         return fail("wall parameters require the hard-wall channel geometry");
     }
     if (p.num_cells <= 0) return fail("num_cells must be positive");
+    if (!std::isfinite(p.phase_field_mobility) || !(p.phase_field_mobility > 0.0))
+        return fail("phase-field mobility must be finite and positive");
+    if (!std::isfinite(p.reference_height) || p.reference_height < 0.0 ||
+        (p.reference_height > 0.0 && !p.substrate_slab()))
+        return fail("reference height must be non-negative and requires a substrate slab");
     if (!std::isfinite(p.rho) || !(p.rho > 0.0 && p.rho < 1.0))
         return fail("rho must be finite and lie in (0,1)");
     if (!std::isfinite(p.dt) || !std::isfinite(p.t_end) ||
@@ -449,17 +469,18 @@ inline bool validate(const SimParams3D& p, const char** error = nullptr) {
     const int edge = p.brick_edge();
     if (edge <= 0 || p.minimum_domain_edge() <= edge)
         return fail("the automatic brick must fit strictly inside the domain");
-    const double gamma_max = p.gamma_normal > p.gamma_cancer
-        ? p.gamma_normal : p.gamma_cancer;
+    const double mrel = 2.0 * p.phase_field_mobility;
+    const double gamma_max = mrel * (p.gamma_normal > p.gamma_cancer
+        ? p.gamma_normal : p.gamma_cancer);
     if (p.dt * gamma_max * kLapRowSumBound >= 1.0)
         return fail("explicit-Euler Laplacian stability bound is violated");
     if (!std::isfinite(p.bulk()) || p.dt * gamma_max * p.bulk() >= 1.0)
         return fail("explicit-Euler bulk-reaction timestep bound is violated");
     if (!std::isfinite(p.interaction()) || !std::isfinite(p.wall_interaction()))
         return fail("cell or wall interaction coefficient is not finite");
-    if (p.dt * p.wall_interaction() >= 1.0)
+    if (p.dt * mrel * p.wall_interaction() >= 1.0)
         return fail("explicit-Euler wall-repulsion timestep bound is violated");
-    if (p.dt * (2.0 * p.mu) >= 1.0)
+    if (p.dt * mrel * (2.0 * p.mu) >= 1.0)
         return fail("explicit-Euler volume-restoring timestep bound is violated");
     const double six_sigma_speed = p.v_A_sigma == 0.0
         ? p.v_A : p.v_A * std::exp(6.0 * p.v_A_sigma);

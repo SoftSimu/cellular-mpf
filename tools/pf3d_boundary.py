@@ -36,7 +36,7 @@ FRAME_MAGIC = b"P3BFRM1\0"
 END_MAGIC = b"P3BEND1\0"
 VERSION = 1
 PROJECTIONS = {1: "basal", 2: "maximum"}
-GEOMETRIES = {7: "periodic", 3: "slab", 11: "channel"}
+GEOMETRIES = {7: "periodic", 3: "slab", 11: "channel", 19: "slab", 35: "slab"}
 CODECS = {0: "none", 1: "zstd"}
 MAX_I64 = (1 << 63) - 1
 FNV_OFFSET = 14695981039346656037
@@ -193,7 +193,7 @@ def parse_file_header(raw: bytes, limits: ReaderLimits | None = None) -> FileHea
         raise BoundaryFormatError("unsupported or malformed file header")
     if projection not in PROJECTIONS or flags not in GEOMETRIES or codec not in CODECS:
         raise BoundaryFormatError("unsupported projection, geometry, or codec")
-    if projection == 1 and flags != 3:
+    if projection == 1 and flags not in (3, 19, 35):
         raise BoundaryFormatError("basal projection requires slab geometry")
     if not 0 < cells <= limits.max_cells:
         raise BoundaryFormatError("cell count is zero or exceeds reader limit")

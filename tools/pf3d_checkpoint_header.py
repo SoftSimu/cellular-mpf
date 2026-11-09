@@ -41,6 +41,7 @@ class FileHeader:
     phase_bytes: int
     stored_crc64: int
     base_measure_shards: int
+    params_bytes: int = PARAMS_BYTES
 
 
 def parse_file_header(raw: bytes) -> FileHeader:
@@ -74,7 +75,7 @@ def parse_file_header(raw: bytes) -> FileHeader:
         or dimensions != DIMENSIONS
         or scalar_format != SCALAR_FLOAT32
         or flags != REQUIRED_HEADER_FLAGS
-        or params_bytes != PARAMS_BYTES
+        or params_bytes not in (PARAMS_BYTES, 304)
         or cell_record_bytes != CELL_RECORD_BYTES
         or phase_order != PHASE_ORDER_X_FASTEST
         or base_measure_shards > MAX_BASE_MEASURE_SHARDS
@@ -102,6 +103,7 @@ def parse_file_header(raw: bytes) -> FileHeader:
         phase_bytes,
         stored_crc64,
         base_measure_shards,
+        params_bytes,
     )
 
 

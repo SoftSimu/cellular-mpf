@@ -62,7 +62,7 @@ class Header:
 
     @property
     def geometry(self):
-        return {3: 'slab', 7: 'periodic', 11: 'channel'}[self.boundary_flags]
+        return {3: 'slab', 7: 'periodic', 11: 'channel', 19: 'slab', 35: 'slab'}[self.boundary_flags]
 
 
 @dataclass(frozen=True)
@@ -161,7 +161,7 @@ class SurfaceReader:
             struct.pack_into('<Q', canonical, 160, 0)
             if (magic != b'PF3SUR1\0' or version != 1 or header_bytes != FILE.size
                     or vertex_bytes != VERTEX.size or cell_bytes != CELL.size
-                    or frame_bytes != FRAME.size or flags not in (3, 7, 11)
+                    or frame_bytes != FRAME.size or flags not in (3, 7, 11, 19, 35)
                     or codec not in (0, 1) or not 0 < cells <= 1_000_000
                     or min(nx, ny, nz) <= 0 or nx != ny or (flags == 7 and nx != nz)
                     or interval <= 0 or level != 0.5 or classification != 1 or shell != 1

@@ -519,6 +519,72 @@ void test_channel_placement_below_diameter() {
     expect(rejected, "non-positive channel heights remain invalid");
 }
 
+void test_uniform_column_reduction() {
+    using namespace pf3d::reference;
+    ModelParameters planar;
+    planar.target_radius = 5.0;
+    planar.lambda = 2.0;
+    planar.reference_height = 1.0;
+    SubstrateState sheet;
+    sheet.side = 32;
+    sheet.height = 1;
+    sheet.neutral_top = true;
+    sheet.cells.resize(2);
+    sheet.cells[0].active_speed = 0.01;
+    sheet.cells[1].active_speed = 0.01;
+    sheet.cells[1].polarity = {0.0, 1.0, 0.0};
+    sheet.phi.resize(2 * sheet.domain_words());
+    for (int cell = 0; cell < 2; ++cell)
+        for (int y = 0; y < sheet.side; ++y)
+            for (int x = 0; x < sheet.side; ++x) {
+                const double dx = x - (12.0 + 7.0 * cell), dy = y - 16.0;
+                sheet.phi[sheet.index(cell, x, y, 0)] = 0.5 * (1.0 -
+                    std::tanh(std::sqrt(30.0) / (2.0 * planar.lambda) *
+                              (std::sqrt(dx*dx + dy*dy) - 5.0)));
+            }
+    const auto expected = one_euler_step_substrate(sheet, planar);
+    for (int height : {2, 4, 8}) {
+        SubstrateState column = sheet;
+        column.height = height;
+        column.phi.resize(2 * column.domain_words());
+        ModelParameters model = planar;
+        model.reference_height = height;
+        model.mobility *= height;
+        model.kappa /= height;
+        model.mu /= height;
+        for (int cell = 0; cell < 2; ++cell) {
+            column.cells[cell].gamma /= height;
+            for (int z = 0; z < height; ++z)
+                for (int y = 0; y < sheet.side; ++y)
+                    for (int x = 0; x < sheet.side; ++x)
+                        column.phi[column.index(cell, x, y, z)] =
+                            sheet.phi[sheet.index(cell, x, y, 0)];
+        }
+        const auto actual = one_euler_step_substrate(column, model);
+        double largest = 0.0;
+        for (int cell = 0; cell < 2; ++cell) {
+            expect(close(actual.velocity[cell].x, expected.velocity[cell].x),
+                   "column mapping preserves the complete x velocity");
+            expect(close(actual.velocity[cell].y, expected.velocity[cell].y),
+                   "column mapping preserves the complete y velocity");
+            for (int z = 0; z < height; ++z)
+                for (int y = 0; y < sheet.side; ++y)
+                    for (int x = 0; x < sheet.side; ++x)
+                        largest = std::max(largest, std::fabs(
+                            actual.phi_next[column.index(cell,x,y,z)] -
+                            expected.phi_next[sheet.index(cell,x,y,0)]));
+        }
+        expect(largest < 2.0e-13, "column mapping preserves every field slice");
+    }
+    sheet.neutral_top = false;
+    sheet.dirichlet_top = true;
+    const double interior = substrate_field_at(sheet, 0, 12, 16, 0);
+    expect(substrate_field_at(sheet, 0, 12, 16, 1) == -interior,
+           "non-wetting lid uses an odd ghost at its face");
+    expect(substrate_field_at(sheet, 0, 12, 16, -1) == interior,
+           "neutral bottom uses an even ghost at its face");
+}
+
 }  // namespace
 
 int main() {
@@ -532,6 +598,7 @@ int main() {
     test_no_overlap_and_exact_subtraction();
     test_periodic_translation();
     test_channel_placement_below_diameter();
+    test_uniform_column_reduction();
     if (failures != 0) {
         std::fprintf(stderr, "%d 3-D one-step CPU-reference test(s) failed\n",
                      failures);

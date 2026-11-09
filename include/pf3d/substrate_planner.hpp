@@ -50,7 +50,7 @@ inline TwoRankValidation validate(const TwoRankSubstrateGeometry& geometry) {
         geometry.pitch_x != expected_pitch) {
         return TwoRankValidation::UnexpectedPitch;
     }
-    if (geometry.boundary_flags != kBoundarySubstrateSlab3D &&
+    if (!is_substrate_slab(geometry.boundary_flags) &&
         geometry.boundary_flags != kBoundaryHardWallChannel3D)
         return TwoRankValidation::WrongBoundaryFlags;
     return TwoRankValidation::Ok;
@@ -437,12 +437,8 @@ inline SeamExchangePlan build_seam_exchange_plan(
         plan.status = SeamPlanStatus::InvalidBaseEdge;
         return plan;
     }
-    // Match SimParams3D::minimum_domain_edge: a channel brick may extend past
-    // both z faces, but must not overlap its own periodic image in x or y.
-    const int minimum_extent =
-        geometry.boundary_flags == kBoundaryHardWallChannel3D
-            ? geometry.nx
-            : (geometry.nz < geometry.nx ? geometry.nz : geometry.nx);
+    // Bounded-z storage clips exterior planes; periodic x/y images must not overlap.
+    const int minimum_extent = geometry.nx;
     if (base_edge < 3 || base_edge % kBrickAlignment != 0 ||
         base_edge >= minimum_extent) {
         plan.status = SeamPlanStatus::InvalidBaseEdge;

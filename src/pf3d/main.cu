@@ -42,6 +42,10 @@ void usage(const char* program) {
         "model and initial condition (fresh runs)\n"
         "  --geometry <periodic|slab|channel> boundary geometry             (periodic)\n"
         "  --slab-height <int>       substrate-slab Nz; default is 2*automatic B\n"
+        "  --slab-top <mode>         free (distant zero field), lid (phi=0 face),\n"
+        "                            neutral (uniform-column reference)\n"
+        "  --reference-height <f>    slab target V0=h*pi*R^2; 0 uses a hemisphere\n"
+        "  --phase-field-mobility <f> Allen-Cahn mobility M (default 0.5)\n"
         "  --channel-height <int>    hard-wall separation in voxels; default ceil(2R)\n"
         "  --wall-kappa <f>          channel wall repulsion; default --kappa\n"
         "  --wall-width <f>          channel wall profile width; default --lambda\n"
@@ -140,7 +144,7 @@ void usage(const char* program) {
         "promoted measurement regrouping is explicitly enabled above.\n"
         "For a slab, --rho targets rho_A when deriving integer Lx; the realized\n"
         "rho_A=N*pi*R^2/Lx^2 is reported. Nz is independent of rho_A,\n"
-        "and V0 is the neutral 90-degree hemispherical cap 2*pi*R^3/3.\n"
+        "and V0=2*pi*R^3/3 unless --reference-height h sets V0=h*pi*R^2.\n"
         "For a channel, --rho likewise targets rho_V; the realized value is\n"
         "N*(4*pi*R^3/3)/(Lx^2*H), where H is the\n"
         "accessible wall separation. Smooth static repulsive wall fields are\n"
@@ -212,8 +216,10 @@ std::filesystem::path default_checkpoint_directory(
 
 void print_configuration(const SimParams3D& p, const RunOptions3D& options,
                          int brick_edge, bool resumed) {
-    const pf3d::BrickSizing3D sizing = pf3d::brick_sizing(
-        p.target_radius, p.lambda);
+    const double seed_radius = p.reference_height > 0.0
+        ? std::cbrt(1.5 * p.reference_height * p.target_radius * p.target_radius)
+        : p.target_radius;
+    const pf3d::BrickSizing3D sizing = pf3d::brick_sizing(seed_radius, p.lambda);
     std::printf(
         "--- 3D model ---\n"
         "  %s  geometry=%s  N=%d  domain=%dx%dx%d  %s target/realized=%.9g/%.9g\n"
@@ -237,6 +243,8 @@ void print_configuration(const SimParams3D& p, const RunOptions3D& options,
         static_cast<unsigned long long>(p.seed),
         static_cast<unsigned long long>(p.polarity_stream()),
         pf3d::storage_mode_name(options.storage_mode), options.memory_fraction);
+    std::printf("  M=%.9g  reference_height=%.9g  boundary_flags=%u\n",
+                p.phase_field_mobility, p.reference_height, p.boundary_flags);
     std::printf(
         "  support estimate %.4f voxels + %.4f safety -> minimum aligned B=%d\n",
         sizing.physical_support_extent, sizing.safety_margin, sizing.edge);
@@ -270,6 +278,8 @@ struct ParsedCommand {
     bool wall_kappa_supplied = false;
     bool wall_width_supplied = false;
     bool wall_padding_supplied = false;
+    std::uint32_t slab_top_flag = 0;
+    bool slab_top_supplied = false;
     int wall_padding = 0;
 };
 
@@ -322,6 +332,23 @@ OptionStatus parse_fresh_parameter_option(int argc, char** argv, int* index,
     SimParams3D& params = command->params;
     const char* value = nullptr;
     long long integer = 0;
+
+    if (std::strcmp(argument, "--slab-top") == 0) {
+        value = value_after(argc, argv, index, argument);
+        if (!value) return OptionStatus::Error;
+        if (std::strcmp(value, "free") == 0) command->slab_top_flag = 0;
+        else if (std::strcmp(value, "neutral") == 0)
+            command->slab_top_flag = pf3d::kBoundaryNeutralTop3D;
+        else if (std::strcmp(value, "lid") == 0)
+            command->slab_top_flag = pf3d::kBoundaryLid3D;
+        else {
+            std::fprintf(stderr, "[3d] --slab-top expects free, neutral, or lid\n");
+            return OptionStatus::Error;
+        }
+        command->slab_top_supplied = true;
+        command->fresh_parameter_supplied = true;
+        return OptionStatus::Accepted;
+    }
 
     if (std::strcmp(argument, "--geometry") == 0) {
         value = value_after(argc, argv, index, argument);
@@ -386,6 +413,8 @@ OptionStatus parse_fresh_parameter_option(int argc, char** argv, int* index,
     }
 
     static const DoubleParameterOption double_options[] = {
+        {"--reference-height", 0.0, 1.0e6, &SimParams3D::reference_height},
+        {"--phase-field-mobility", 1.0e-12, 1.0e9, &SimParams3D::phase_field_mobility},
         {"--radius", 1.0e-6, 1.0e6, &SimParams3D::target_radius},
         {"--rho", 1.0e-9, 0.999999999, &SimParams3D::rho},
         {"--lambda", 1.0e-6, 1.0e6, &SimParams3D::lambda},
@@ -763,6 +792,13 @@ CommandStatus parse_command_line(int argc, char** argv,
 
 bool resolve_fresh_geometry(ParsedCommand* command) {
     SimParams3D& params = command->params;
+    if (command->slab_top_supplied) {
+        if (!params.substrate_slab()) {
+            std::fprintf(stderr, "[3d] --slab-top requires --geometry slab\n");
+            return false;
+        }
+        params.boundary_flags |= command->slab_top_flag;
+    }
     if (command->slab_height_supplied && !params.substrate_slab()) {
         std::fprintf(stderr, "[3d] --slab-height requires --geometry slab\n");
         return false;
@@ -829,10 +865,9 @@ bool resolve_fresh_geometry(ParsedCommand* command) {
         }
         const int height = command->slab_height_supplied
             ? command->slab_height : 2 * automatic_brick;
-        if (height <= automatic_brick) {
+        if (height < 2) {
             std::fprintf(stderr,
-                "[3d] slab height %d must exceed automatic brick edge %d\n",
-                height, automatic_brick);
+                "[3d] slab height %d must be at least two planes\n", height);
             return false;
         }
         params.Nx = params.Ny = side;
@@ -986,13 +1021,6 @@ CommandStatus prepare_run(ParsedCommand* command, PreparedRun* prepared) {
         ? prepared->checkpoint.brick_edge
         : command->options.brick_edge > 0
             ? command->options.brick_edge : prepared->effective.brick_edge();
-    if (prepared->effective.substrate_slab() &&
-        prepared->effective.Nz <= prepared->effective_brick) {
-        std::fprintf(stderr,
-            "[3d] slab height %d must exceed selected brick edge %d\n",
-            prepared->effective.Nz, prepared->effective_brick);
-        return CommandStatus::UsageError;
-    }
     return CommandStatus::Ready;
 }
 

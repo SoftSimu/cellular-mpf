@@ -67,6 +67,8 @@ struct ModelParameters {
     double wall_kappa = 0.0;
     double mu = 1.0;
     double xi = 1500.0;
+    double mobility = 0.5;
+    double reference_height = 0.0;
 };
 
 // Cell-major, x-fastest full-domain fields. Full periodic fields keep the
@@ -100,6 +102,7 @@ struct SubstrateState {
     int side = 0;
     int height = 0;
     bool neutral_top = false;
+    bool dirichlet_top = false;
     bool three_dimensional_motion = false;
     std::vector<CellParameters> cells;
     std::vector<double> phi;
@@ -325,10 +328,10 @@ inline OneStepResult one_euler_step(const DenseState& state,
                     const double other = other_field(result.aggregate_q[local], phi);
                     const double laplacian = laplacian_at(state, cell, x, y, z);
                     const Vector3 gradient = gradient_at(state, cell, x, y, z);
-                    const double rhs = parameters.gamma * laplacian
+                    const double rhs = (2.0 * model.mobility) * (parameters.gamma * laplacian
                         - bulk * phi * (1.0 - phi) * (1.0 - 2.0 * phi)
                         + volume_term * phi
-                        - repulsion * phi * other
+                        - repulsion * phi * other)
                         - (velocity.x * gradient.x + velocity.y * gradient.y
                            + velocity.z * gradient.z);
                     result.phi_next[base + local] = phi + model.dt * rhs;
@@ -340,9 +343,9 @@ inline OneStepResult one_euler_step(const DenseState& state,
 }
 
 inline void validate_substrate_state(const SubstrateState& state) {
-    if (state.side < 3 || state.height < 2 || state.cells.empty())
+    if (state.side < 3 || state.height < 1 || state.cells.empty())
         throw std::invalid_argument(
-            "the substrate CPU reference requires side >= 3 and height >= 2");
+            "the substrate CPU reference requires side >= 3 and height >= 1");
     const std::size_t words = state.domain_words();
     std::size_t expected = 0;
     if (words == 0 ||
@@ -380,12 +383,14 @@ inline double substrate_field_at(const SubstrateState& state, int cell,
     std::int64_t source_z = static_cast<std::int64_t>(z);
     if (source_z < -1) return 0.0;
     if (source_z == -1) source_z = 0;
-    if (state.neutral_top && source_z == state.height)
+    const bool upper = source_z == state.height;
+    if ((state.neutral_top || state.dirichlet_top) && upper)
         source_z = state.height - 1;
     if (source_z >= static_cast<std::int64_t>(state.height)) return 0.0;
     const std::size_t local = substrate_domain_index(
         state.side, x, y, static_cast<int>(source_z));
-    return state.phi[static_cast<std::size_t>(cell) * state.domain_words()
+    return (upper && state.dirichlet_top ? -1.0 : 1.0) *
+        state.phi[static_cast<std::size_t>(cell) * state.domain_words()
                    + local];
 }
 
@@ -499,9 +504,10 @@ inline OneStepResult one_euler_step_substrate(
                 : 0.0};
     }
 
-    const double volume0 = state.three_dimensional_motion
-        ? target_sphere_volume(model.target_radius)
-        : target_slab_volume(model.target_radius);
+    const double volume0 = model.reference_height > 0.0
+        ? model.reference_height * kReferencePi * model.target_radius * model.target_radius
+        : state.three_dimensional_motion ? target_sphere_volume(model.target_radius)
+                                        : target_slab_volume(model.target_radius);
     const double volume_scale = 2.0 * model.mu / volume0;
     const double bulk_scale = 30.0 / (model.lambda * model.lambda);
     const double repulsion = 60.0 * model.kappa
@@ -530,10 +536,10 @@ inline OneStepResult one_euler_step_substrate(
                         state, cell, x, y, z);
                     const Vector3 gradient = substrate_gradient_at(
                         state, cell, x, y, z);
-                    const double rhs = parameters.gamma * laplacian
+                    const double rhs = (2.0 * model.mobility) * (parameters.gamma * laplacian
                         - bulk * phi * (1.0 - phi) * (1.0 - 2.0 * phi)
                         + volume_term * phi
-                        - repulsion * phi * other
+                        - repulsion * phi * other)
                          - (velocity.x * gradient.x
                             + velocity.y * gradient.y
                             + velocity.z * gradient.z);

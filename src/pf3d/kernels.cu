@@ -197,11 +197,12 @@ __device__ __forceinline__ bool load_halo(const float* tile, int B,
         const int y = y0 + hy - 1;
         const int z = z0 + hz - 1;
         int source_z = 0;
+        const int sign = phase_fetch_local_z(layout, origin_z, z, B, &source_z);
         const float value =
             (static_cast<unsigned>(x) < static_cast<unsigned>(B) &&
              static_cast<unsigned>(y) < static_cast<unsigned>(B) &&
-             phase_fetch_local_z(layout, origin_z, z, B, &source_z))
-                ? tile[storage.index(x, y, source_z, B, origin_z)] : 0.0f;
+             sign != 0)
+                ? sign * tile[storage.index(x, y, source_z, B, origin_z)] : 0.0f;
         shared_phi[(hz * kHaloY + hy) * kHaloRowStride + hx] = value;
         any_nonzero = any_nonzero || value != 0.0f;
     }
@@ -338,13 +339,19 @@ __device__ __forceinline__ void prefetch_halo(const float* tile, int B,
         const int z = z0 + row / kHaloY;
         float* const destination = shared_buf + row * RowStride + hx;
         int source_z = 0;
+        const int sign = fetch_z(z, &source_z);
         if (static_cast<unsigned>(x) < static_cast<unsigned>(B) &&
             x + 3 < B &&
             static_cast<unsigned>(y) < static_cast<unsigned>(B) &&
-            fetch_z(z, &source_z)) {
-            __pipeline_memcpy_async(destination,
-                &tile[local_index(x, y, source_z + storage_z_offset, B)],
-                sizeof(float4));
+            sign != 0) {
+            const float* source = &tile[local_index(x, y, source_z + storage_z_offset, B)];
+            if (sign < 0) {
+                const float4 value = *reinterpret_cast<const float4*>(source);
+                *reinterpret_cast<float4*>(destination) =
+                    make_float4(-value.x, -value.y, -value.z, -value.w);
+            } else {
+                __pipeline_memcpy_async(destination, source, sizeof(float4));
+            }
         } else {
             *reinterpret_cast<float4*>(destination) = make_float4(0, 0, 0, 0);
         }
@@ -359,12 +366,13 @@ __device__ __forceinline__ void prefetch_halo(const float* tile, int B,
         const int z = z0 + row / kHaloY;
         float* const destination = shared_buf + row * RowStride + hx;
         int source_z = 0;
+        const int sign = fetch_z(z, &source_z);
         if (static_cast<unsigned>(x) < static_cast<unsigned>(B) &&
             static_cast<unsigned>(y) < static_cast<unsigned>(B) &&
-            fetch_z(z, &source_z)) {
-            __pipeline_memcpy_async(destination,
-                &tile[local_index(x, y, source_z + storage_z_offset, B)],
-                sizeof(float));
+            sign != 0) {
+            const float* source = &tile[local_index(x, y, source_z + storage_z_offset, B)];
+            if (sign < 0) *destination = -*source;
+            else __pipeline_memcpy_async(destination, source, sizeof(float));
         } else {
             *destination = 0.0f;
         }
@@ -652,7 +660,7 @@ __device__ void process_update_cell(int n, const UpdateArgs3D& args,
     const int origin_y = wrap_origin(state->origin_y, args.layout.ny);
     // Load cell-wide values once because pointer aliasing prevents reliable
     // compiler hoisting inside the voxel loop.
-    const float gamma = state->gamma;
+    const float gamma = state->gamma * args.mobility_scale;
     const float velocity_x = state->velocity_x;
     const float velocity_y = state->velocity_y;
     const float velocity_z = state->velocity_z;
@@ -747,7 +755,7 @@ __device__ void process_update_cell(int n, const UpdateArgs3D& args,
                     raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
                     continue;
                 }
-                if (args.layout.substrate_slab() &&
+                if (args.layout.free_top() &&
                     wz == args.layout.nz - 1 && fabsf(next) > kSupportEps) {
                     raise_flag(state, args.global_flags,
                                FLAG3D_SLAB_TOP_CONTACT);
@@ -944,7 +952,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                             || args.layout.bounded_z();
         const auto z_map = bounded_z
             ? BoundedZMap::make(origin_z, B, args.layout.nz,
-                               args.layout.hard_wall_channel())
+                               args.layout.reflect_upper(), args.layout.odd_upper())
             : BoundedZMap{};
         const auto fetch_z = [&](int z, int* source_z) {
             return bounded_z ? z_map.fetch(z, source_z)
@@ -953,7 +961,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         const int storage_z_offset = args.storage.compact(B)
             ? static_cast<int>(origin_z) : 0;
         // Constant for the whole brick; see process_update_cell.
-        const float gamma = state->gamma;
+        const float gamma = state->gamma * args.mobility_scale;
         const float velocity_x = state->velocity_x;
         const float velocity_y = state->velocity_y;
         const float velocity_z = state->velocity_z;
@@ -1144,7 +1152,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                         return;
                     }
                     if constexpr (!Interior || !WallCoupling) {
-                        if (args.layout.substrate_slab() && wz == args.layout.nz - 1 &&
+                        if (args.layout.free_top() && wz == args.layout.nz - 1 &&
                             fabsf(next) > kSupportEps) {
                             raise_flag(state, args.global_flags, FLAG3D_SLAB_TOP_CONTACT);
                             return;
@@ -1379,7 +1387,8 @@ __global__ void k_initialize_spheres(InitArgs3D args) {
             args.layout, state->origin_z, z, &physical_z);
         const double dx = static_cast<double>(state->origin_x + x) - centre.x;
         const double dy = static_cast<double>(state->origin_y + y) - centre.y;
-        const double dz = static_cast<double>(state->origin_z + z) - centre.z;
+        const double dz = args.column ? 0.0
+            : static_cast<double>(state->origin_z + z) - centre.z;
         const float radius = static_cast<float>(sqrt(dx * dx + dy * dy + dz * dz));
         even[q] = in_domain
             ? 0.5f * (1.0f - tanhf(k * (radius - args.seed_radius)))
@@ -1410,7 +1419,7 @@ __global__ void k_clear_selected_base_out(UpdateArgs3D args,
     if (complete_output && unshifted_output(args.cells[n])) {
         if (!args.layout.bounded_z()) return;
         const auto map = BoundedZMap::make(args.cells[n].origin_z, args.B,
-            args.layout.nz, args.layout.hard_wall_channel());
+            args.layout.nz, args.layout.reflect_upper(), args.layout.odd_upper());
         if (map.lo < map.hi) {
             const int offset = args.storage.compact(args.B) ? map.origin : 0;
             const std::size_t plane = static_cast<std::size_t>(args.B) * args.B;
@@ -1565,7 +1574,7 @@ __device__ void measure_one_cell(const MeasureArgs3D& args, int n, int B,
     const bool bounded_z = args.layout.bounded_z();
     const auto z_map = bounded_z
         ? BoundedZMap::make(origin_z, B, args.layout.nz,
-                           args.layout.hard_wall_channel())
+                           args.layout.reflect_upper(), args.layout.odd_upper())
         : BoundedZMap{};
     const auto fetch_z = [&](int z, int* source_z) {
         return bounded_z ? z_map.fetch(z, source_z)
@@ -1656,7 +1665,7 @@ __device__ void measure_one_cell(const MeasureArgs3D& args, int n, int B,
                 local.phi_max_bits = max(local.phi_max_bits,
                                          __float_as_uint(fabsf(centre)));
                 if (fabsf(centre) > kSupportEps) {
-                    if (args.layout.substrate_slab() &&
+                    if (args.layout.free_top() &&
                         wz == args.layout.nz - 1)
                         raise_flag(state, args.global_flags,
                                    FLAG3D_SLAB_TOP_CONTACT);
@@ -1742,7 +1751,7 @@ void k_measure_promoted_shards_impl(MeasureArgs3D args,
     const bool bounded_z = args.layout.bounded_z();
     const auto z_map = bounded_z
         ? BoundedZMap::make(origin_z, B, args.layout.nz,
-                           args.layout.hard_wall_channel())
+                           args.layout.reflect_upper(), args.layout.odd_upper())
         : BoundedZMap{};
     const auto fetch_z = [&](int z, int* source_z) {
         return bounded_z ? z_map.fetch(z, source_z)
@@ -1849,7 +1858,7 @@ void k_measure_promoted_shards_impl(MeasureArgs3D args,
                 local.phi_max_bits = max(local.phi_max_bits,
                                          __float_as_uint(fabsf(centre)));
                 if (fabsf(centre) > kSupportEps) {
-                    if (args.layout.substrate_slab() &&
+                    if (args.layout.free_top() &&
                         wz == args.layout.nz - 1)
                         raise_flag(state, args.global_flags,
                                    FLAG3D_SLAB_TOP_CONTACT);
@@ -1934,7 +1943,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
     const bool bounded_z = args.layout.bounded_z();
     const auto z_map = bounded_z
         ? BoundedZMap::make(origin_z, B, args.layout.nz,
-                           args.layout.hard_wall_channel())
+                           args.layout.reflect_upper(), args.layout.odd_upper())
         : BoundedZMap{};
     const auto fetch_z = [&](int z, int* source_z) {
         return bounded_z ? z_map.fetch(z, source_z)
@@ -2102,7 +2111,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                         second_max = max(second_max, __float_as_uint(fabsf(centre)));
                     if (fabsf(centre) > kSupportEps) {
                         if constexpr (!Interior || !WallCoupling) {
-                            if (args.layout.substrate_slab() && wz == args.layout.nz - 1)
+                            if (args.layout.free_top() && wz == args.layout.nz - 1)
                                 raise_flag(state, args.global_flags, FLAG3D_SLAB_TOP_CONTACT);
                         }
                         local.lo_z = min(local.lo_z, z);
@@ -2899,7 +2908,7 @@ __device__ void verify_one_cell(const float* tile, const CellState3D* cells,
                                           % static_cast<std::size_t>(B));
             edge += (x == 0 || x == B - 1 || y == 0 || y == B - 1 ||
                      z == 0 || z == B - 1 ||
-                     (layout.substrate_slab() &&
+                     (layout.free_top() &&
                       physical_z == layout.nz - 1));
         }
     }
@@ -3198,7 +3207,7 @@ cudaError_t configure_tile_kernel_shared_memory() {
 bool valid_runtime_geometry(int B, const SLayout3D& layout) {
     return B > 0 && B % kBrickAlignment == 0
         && layout.nx > B && layout.ny > B
-        && (layout.hard_wall_channel() ? layout.nz > 0 : layout.nz > B)
+        && (layout.bounded_z() ? layout.nz > 0 : layout.nz > B)
         && layout.pitch_x >= layout.nx && layout.pitch_x % 4 == 0
         && recognized_boundary(layout);
 }

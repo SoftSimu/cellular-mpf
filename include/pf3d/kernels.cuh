@@ -174,6 +174,16 @@ struct SLayout3D {
         return boundary_flags == kBoundaryPeriodicXYZ3D;
     }
     __host__ __device__ constexpr bool substrate_slab() const {
+        return is_substrate_slab(boundary_flags);
+    }
+    __host__ __device__ constexpr bool reflect_upper() const {
+        return hard_wall_channel() ||
+               (boundary_flags & (kBoundaryNeutralTop3D | kBoundaryLid3D)) != 0;
+    }
+    __host__ __device__ constexpr bool odd_upper() const {
+        return (boundary_flags & kBoundaryLid3D) != 0;
+    }
+    __host__ __device__ constexpr bool free_top() const {
         return boundary_flags == kBoundarySubstrateSlab3D;
     }
     __host__ __device__ constexpr bool hard_wall_channel() const {
@@ -220,6 +230,7 @@ struct InitArgs3D {
     // Centered CPU-reference calibration; displaced float32 seeds are measured
     // before their first update and need not equal V0 exactly.
     float seed_radius;
+    bool column = false;
     CellFieldStorage3D storage{};
 };
 
@@ -314,6 +325,7 @@ struct UpdateArgs3D {
     double volume_scale;
     float bulk_scale;
     float interaction_coeff;
+    float mobility_scale = 1.0f;
     // Exact destination surface measurement is an additional tiled pass.
     // Normal stepping leaves this false; output paths measure the current
     // field explicitly through MeasureArgs3D::compute_surface.

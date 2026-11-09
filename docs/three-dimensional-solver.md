@@ -42,6 +42,18 @@ footprint area fraction for substrate slabs. For a slab, use `--geometry slab`
 and set its height with `--slab-height`. All lengths and times are in model units.
 Use `--help` for the full option list.
 
+### Neutral substrate with a lid or free surface
+
+Slab motion is horizontal: both propulsion and interaction-induced velocity have zero z component. The phase field can still change height through relaxation. The bottom face has a zero normal derivative, with no adhesion or wall energy.
+
+`--slab-top free` retains a distant zero-field boundary and stops if a cell reaches it. `--slab-top lid` places a zero-field boundary at the upper face, using an odd-reflected ghost. `--slab-top neutral` instead reflects the upper ghost evenly and initializes uniform columns for a planar-reduction check. The physical face separation is `--slab-height`; the cell-centred lattice runs from half a voxel above the substrate to half a voxel below the upper face.
+
+`--reference-height h` sets the target volume to `h*pi*R^2`, independently of the box height. Without this option the target is the hemispherical volume. The footprint fraction remains `N*pi*R^2/(Nx*Ny)`; it is a target area convention, not a measurement of the occupied basal area.
+
+`--phase-field-mobility M` multiplies the complete passive field equation by `M/0.5`, leaving advection and the velocity law unchanged. To reproduce a planar model in a uniform column of height h, divide its gamma, kappa and mu by h, multiply M by h, keep xi and the active parameters unchanged, and use `--reference-height h --slab-height h --slab-top neutral`. Integrating over z then recovers the planar forces, area constraint and field update. A free surface or non-wetting lid permits height-dependent shapes, so this reduction is a verification problem rather than a prediction of identical cell-layer dynamics.
+
+These settings are stored in checkpoints and trajectory metadata. Parameter records use an optional 16-byte extension for mobility and reference height; checkpoints without it retain M=0.5 and the original target volume. Older executables reject the extended record rather than silently dropping its parameters.
+
 ## Save and continue
 
 The trajectory records positions, velocities and shape measurements.

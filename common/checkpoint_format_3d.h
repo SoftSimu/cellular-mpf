@@ -36,6 +36,8 @@ constexpr std::uint32_t kBoundaryPeriodicY = 1u << 1;
 constexpr std::uint32_t kBoundaryPeriodicZ = 1u << 2;
 // Distinguishes a resolved two-wall channel from a substrate slab.
 constexpr std::uint32_t kBoundaryChannelZ = 1u << 3;
+constexpr std::uint32_t kBoundaryNeutralTop = 1u << 4;
+constexpr std::uint32_t kBoundaryLid = 1u << 5;
 constexpr std::uint32_t kBoundaryPeriodicXY =
     kBoundaryPeriodicX | kBoundaryPeriodicY;
 constexpr std::uint32_t kBoundarySubstrateSlab = kBoundaryPeriodicXY;
@@ -44,13 +46,19 @@ constexpr std::uint32_t kBoundaryPeriodicXYZ =
 constexpr std::uint32_t kBoundaryHardWallChannel =
     kBoundaryPeriodicXY | kBoundaryChannelZ;
 
+constexpr bool substrate_geometry(std::uint32_t flags) {
+    return flags == kBoundarySubstrateSlab ||
+           flags == (kBoundarySubstrateSlab | kBoundaryNeutralTop) ||
+           flags == (kBoundarySubstrateSlab | kBoundaryLid);
+}
+
 constexpr bool valid_domain_geometry(std::uint32_t boundary_flags,
                                      std::int64_t nx, std::int64_t ny,
                                      std::int64_t nz) {
     if (nx <= 0 || ny <= 0 || nz <= 0) return false;
     return (boundary_flags == kBoundaryPeriodicXYZ &&
             nx == ny && nx == nz) ||
-           ((boundary_flags == kBoundarySubstrateSlab ||
+           ((substrate_geometry(boundary_flags) ||
              boundary_flags == kBoundaryHardWallChannel) && nx == ny);
 }
 
@@ -59,7 +67,7 @@ constexpr std::int64_t storage_domain_edge(std::uint32_t boundary_flags,
                                            std::int64_t ny,
                                            std::int64_t nz) {
     const std::int64_t xy = nx < ny ? nx : ny;
-    return boundary_flags == kBoundaryHardWallChannel
+    return boundary_flags == kBoundaryHardWallChannel || substrate_geometry(boundary_flags)
         ? xy : (xy < nz ? xy : nz);
 }
 
@@ -261,6 +269,10 @@ struct ParamsRecord3D {
     std::int64_t channel_padding;
     double wall_kappa;
     double wall_width;
+    // Optional 16-byte extension. A 288-byte record implies M=0.5 and the
+    // geometry's spherical/hemispherical target; new physics writes 304 bytes.
+    double phase_field_mobility = 0.5;
+    double reference_height = 0.0;
 };
 
 // Future-relevant state is serialized field by field, independent of CUDA ABI.
@@ -336,7 +348,7 @@ inline bool cell_motion_matches_geometry(const CellRecord3D& cell,
         return std::isfinite(norm2) &&
                std::fabs(norm2 - 1.0) <= kPolarityNormTolerance;
     }
-    if (boundary_flags == kBoundarySubstrateSlab) {
+    if (substrate_geometry(boundary_flags)) {
         if (cell.polarity_z != 0.0f || cell.velocity_z != 0.0f) return false;
         const double norm2 =
             static_cast<double>(cell.polarity_x) * cell.polarity_x +
@@ -351,7 +363,7 @@ inline bool cell_motion_matches_geometry(const CellRecord3D& cell,
 inline bool cell_support_respects_z_boundaries(
     const CellRecord3D& cell, std::uint32_t boundary_flags, std::int64_t nz) {
     if (boundary_flags == kBoundaryPeriodicXYZ) return true;
-    if ((boundary_flags != kBoundarySubstrateSlab &&
+    if ((!substrate_geometry(boundary_flags) &&
          boundary_flags != kBoundaryHardWallChannel) || nz <= 0 ||
         cell.bbox_lo_z < 0 || cell.bbox_lo_z > cell.bbox_hi_z) {
         return false;
@@ -361,7 +373,9 @@ inline bool cell_support_respects_z_boundaries(
 }
 
 static_assert(sizeof(FileHeader3D) == 96, "3D checkpoint header layout drift");
-static_assert(sizeof(ParamsRecord3D) == 288, "3D parameter layout drift");
+constexpr std::size_t kBaseParamsBytes = 288;
+static_assert(sizeof(ParamsRecord3D) == 304, "3D parameter layout drift");
+static_assert(offsetof(ParamsRecord3D, phase_field_mobility) == kBaseParamsBytes);
 static_assert(sizeof(CellRecord3D) == 256, "3D cell-record layout drift");
 
 static_assert(offsetof(FileHeader3D, step) == 24, "3D step offset drift");

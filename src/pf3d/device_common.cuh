@@ -134,11 +134,10 @@ __device__ __forceinline__ bool aggregate_z(
     return true;
 }
 
-// Local phase-field fetch at a z boundary. The substrate slab reflects its
-// lower ghost and uses a zero far field at the top. A resolved channel reflects
-// one ghost layer only at the outer allocation faces buried in solid padding.
-// Periodic geometry keeps the existing local-brick zero halo.
-__device__ __forceinline__ bool phase_fetch_local_z(
+// Signed phase-field fetch: +1 copies a real or neutral ghost plane, -1
+// reflects a Dirichlet lid, and zero denotes an exterior zero halo. Channel
+// outer faces are neutral and lie inside the resolved solid padding.
+__device__ __forceinline__ int phase_fetch_local_z(
     const SLayout3D& layout, std::int64_t origin_z, int requested_local_z,
     int B, int* source_local_z) {
     if (layout.periodic_xyz()) {
@@ -152,7 +151,8 @@ __device__ __forceinline__ bool phase_fetch_local_z(
     std::int64_t world = 0;
     if (!checked_world_coordinate(origin_z, requested_local_z, &world))
         return false;
-    if (layout.hard_wall_channel() &&
+    const bool upper_ghost = world == static_cast<std::int64_t>(layout.nz);
+    if (layout.reflect_upper() &&
         world == static_cast<std::int64_t>(layout.nz))
         world = static_cast<std::int64_t>(layout.nz) - 1;
     if (world >= static_cast<std::int64_t>(layout.nz)) return false;
@@ -163,7 +163,7 @@ __device__ __forceinline__ bool phase_fetch_local_z(
     if (!checked_world_difference(world, origin_z, &local)) return false;
     if (local < 0 || local >= static_cast<std::int64_t>(B)) return false;
     *source_local_z = static_cast<int>(local);
-    return true;
+    return upper_ghost && layout.odd_upper() ? -1 : 1;
 }
 
 __device__ __forceinline__ std::size_t s_index(const SLayout3D& layout,

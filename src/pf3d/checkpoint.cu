@@ -134,7 +134,8 @@ bool header_valid(const ckpt3d::FileHeader3D& h, const std::string& path) {
     if (h.version != ckpt3d::kCheckpointFormat)
         return reject("unsupported PF3D checkpoint format");
     if (h.header_bytes != sizeof(ckpt3d::FileHeader3D) ||
-        h.params_bytes != sizeof(ckpt3d::ParamsRecord3D) ||
+        (h.params_bytes != sizeof(ckpt3d::ParamsRecord3D) &&
+         h.params_bytes != ckpt3d::kBaseParamsBytes) ||
         h.cell_record_bytes != sizeof(ckpt3d::CellRecord3D))
         return reject("record-size fields do not match the PF3D contract");
     if (h.endian_marker != ckpt3d::kEndianMarker ||
@@ -198,6 +199,8 @@ void params_from_record(const ckpt3d::ParamsRecord3D& in,
     out->channel_padding = static_cast<int>(in.channel_padding);
     out->wall_kappa = in.wall_kappa;
     out->wall_width = in.wall_width;
+    out->phase_field_mobility = in.phase_field_mobility;
+    out->reference_height = in.reference_height;
 }
 
 void params_to_record(const CheckpointWriteView3D& view,
@@ -245,6 +248,8 @@ void params_to_record(const CheckpointWriteView3D& view,
     out->channel_padding = p.channel_padding;
     out->wall_kappa = p.wall_kappa;
     out->wall_width = p.wall_width;
+    out->phase_field_mobility = p.phase_field_mobility;
+    out->reference_height = p.reference_height;
 }
 
 bool params_record_valid(const ckpt3d::ParamsRecord3D& p,
@@ -264,7 +269,8 @@ bool params_record_valid(const ckpt3d::ParamsRecord3D& p,
     const double scalar_parameters[] = {
         p.dx, p.dy, p.dz, p.dt, p.t_end, p.lambda, p.gamma_normal,
         p.gamma_soft, p.soft_fraction, p.kappa, p.target_radius, p.mu,
-        p.v_A, p.v_A_sigma, p.xi, p.tau, p.volume_fraction, p.aging_time};
+        p.v_A, p.v_A_sigma, p.xi, p.tau, p.volume_fraction, p.aging_time,
+        p.phase_field_mobility, p.reference_height};
     for (double value : scalar_parameters)
         if (!std::isfinite(value))
             return reject("checkpoint contains a non-finite parameter");
@@ -804,6 +810,8 @@ bool params_equal(const SimParams3D& a, const SimParams3D& b) {
            a.channel_padding == b.channel_padding &&
            a.wall_kappa == b.wall_kappa &&
            a.wall_width == b.wall_width &&
+           a.phase_field_mobility == b.phase_field_mobility &&
+           a.reference_height == b.reference_height &&
            a.full_moment_every == b.full_moment_every &&
            a.verify_every == b.verify_every;
 }
@@ -1168,7 +1176,9 @@ bool checkpoint_write_3d(const std::string& path,
     header.step = static_cast<std::int64_t>(view.step);
     header.time = view.time;
     header.num_cells = static_cast<std::uint64_t>(N);
-    header.params_bytes = sizeof(ckpt3d::ParamsRecord3D);
+    header.params_bytes = view.params->phase_field_mobility == 0.5 &&
+                          view.params->reference_height == 0.0
+        ? ckpt3d::kBaseParamsBytes : sizeof(ckpt3d::ParamsRecord3D);
     header.cell_record_bytes = sizeof(ckpt3d::CellRecord3D);
     header.brick_edge = static_cast<std::uint32_t>(view.brick_edge);
     header.phase_order = ckpt3d::kPhaseOrderXFastest;

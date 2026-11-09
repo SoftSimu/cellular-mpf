@@ -107,8 +107,8 @@ def read_checkpoint(
             else 0
         )
 
-        params = stream.read(PARAMS_BYTES)
-        if len(params) != PARAMS_BYTES:
+        params = stream.read(header.params_bytes)
+        if len(params) != header.params_bytes:
             raise ValueError("truncated PF3D parameter record")
         if verify_crc:
             computed_crc64 = crc64.ecma_182(params, computed_crc64)
@@ -117,13 +117,13 @@ def read_checkpoint(
         boundary_flags = struct.unpack_from("<I", params, 52)[0]
         radius = struct.unpack_from("<d", params, 112)[0]
         area_fraction = struct.unpack_from("<d", params, 160)[0]
-        if boundary_flags != SUBSTRATE_SLAB_FLAGS:
+        if boundary_flags not in (SUBSTRATE_SLAB_FLAGS, 19, 35):
             raise ValueError("checkpoint is not a periodic-XY substrate slab")
         if (
             nx <= 0
             or nx > MAX_INT32
             or nx != ny
-            or nz <= brick_edge
+            or nz <= 0
             or nz > MAX_INT32
             or params_brick_edge != brick_edge
         ):
@@ -161,7 +161,7 @@ def read_checkpoint(
             if (
                 edge < brick_edge
                 or edge > MAX_BRICK_EDGE
-                or edge >= min(nx, ny, nz)
+                or edge >= min(nx, ny)
                 or edge % STORAGE_EDGE_ALIGNMENT != 0
             ):
                 raise ValueError(f"invalid storage edge {edge} for cell {global_id}")
