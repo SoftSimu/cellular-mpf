@@ -83,6 +83,8 @@ The `cancer` options name the soft-cell population. A
 [mobility map](docs/cell-specific-mobility.md) assigns values to individual
 cells, allowing passive relaxation to vary at fixed interfacial coefficients.
 Propulsion speed and interaction advection have separate coefficients.
+The [3D guide](docs/three-dimensional-solver.md) describes the corresponding
+mobility options, target-volume choices and uniform-column parameter mapping.
 The [solver reference](docs/solver-reference.md#model-and-numerical-scheme)
 describes the discretization and coefficient definitions. Lengths are in unit
 lattice spacings and time is in model units.

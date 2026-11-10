@@ -86,7 +86,8 @@ mobility. Passive velocity components include its `M_i/M0` multiplier;
 advection components do not. Plain-text trajectory columns are unchanged and
 do not record mobility: retain the input map and checkpoints with the run.
 
-Mobility maps apply only to `cell_gh200`. Exporting relaxed 2D centres creates
+This page describes `cell_gh200`; the [3D guide](three-dimensional-solver.md)
+documents its uniform mobility and per-cell overrides. Exporting relaxed 2D centres creates
 positions for fresh 3D cells, not a transfer of mobility or phase-field state.
 The exporter's provenance records checkpoint mobility metadata when available.
 See [boundary output](boundary-output.md) and [velocity output](velocity-output.md).

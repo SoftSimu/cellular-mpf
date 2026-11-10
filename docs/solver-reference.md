@@ -24,11 +24,13 @@ examples. The 3D solver uses an isotropic 27-point Laplacian, with face, edge,
 corner and centre weights of 14, 3, 1 and -128, divided by 30. Coefficients and
 boundary terms are defined in [`include/pf3d/params.cuh`](../include/pf3d/params.cuh)
 and [`include/pf3d/reference.hpp`](../include/pf3d/reference.hpp). Periodic cells
-have full-sphere target volume and unrestricted 3D polarity. Substrate cells have hemispherical target
-volume, neutral 90-degree contact and planar translation. The hard-wall channel
+have full-sphere target volume and unrestricted 3D polarity. Substrate cells have neutral
+90-degree contact and planar translation. Their target volume is hemispherical
+by default, or `h*pi*R^2` with `--reference-height h`. The hard-wall channel
 contains full-volume cells with unrestricted 3D motion between resolved steric
 walls. These are distinct geometries, not interchangeable boundary settings
-for a single physical model. Per-cell mobility maps are 2D-only.
+for a single physical model. Both the 2D and 3D solvers support per-cell mobility
+maps; their checkpoint representations are described in the respective guides.
 
 The 2D and 3D numerical cores share coefficient and Philox primitives in
 `common/`; their fields, stencils, counters and update kernels are

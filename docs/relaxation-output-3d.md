@@ -10,7 +10,7 @@ The interfacial derivative is `-2 gamma Laplacian(phi) + 60 gamma/lambda² phi(1
 
 The observer uses the current stored float fields, the solver's quantized aggregate, its 27-point Laplacian and the same boundary reflections. The spatial sums and derivative evaluation use double precision. It computes its own volume and centroid; cached solver moments can describe the preceding step. It never refreshes solver measurements, draws random numbers, or alters fields, velocities, or recentering. On two GPUs it reads each cell on its owner, without gathering phase fields. The current launch supports at most 65,535 owned cells on each device.
 
-Centroid coordinates match the ordinary trajectory: unwrapped x and y are lattice coordinates, and z is height above the substrate, half a voxel below the first cell-centred plane. Surface exporters may use a cell-corner convention; account for that offset when overlaying coordinates rather than changing the displacement definition.
+Centroid coordinates match the ordinary trajectory: unwrapped x and y are lattice coordinates, and z is height above the substrate. The substrate lies half a voxel below the first cell-centred plane. Surface exporters may use a cell-corner convention; account for that offset when overlaying coordinates rather than changing the displacement definition.
 
 ## Sampling and interpretation
 
