@@ -112,13 +112,17 @@ void k_update_periodic_slab_walk_fast(UpdateArgs3D args) {
     const int shift_x = state->pending_shift_x;
     const int shift_y = state->pending_shift_y;
     const int shift_z = state->pending_shift_z;
-    const float gamma = state->gamma * args.mobility_scale;
+    const float ratio = state->M_pf == 0.0f ? 1.0f : state->M_pf / args.uniform_mobility;
+    const float gamma = ratio == 1.0f ? state->gamma * args.mobility_scale
+                                     : (state->gamma * args.mobility_scale) * ratio;
     const float velocity_x = state->velocity_x;
     const float velocity_y = state->velocity_y;
     const float velocity_z = state->velocity_z;
     const float bulk = args.bulk_scale * gamma;
-    const float volume = static_cast<float>(
+    const float inherited_volume = static_cast<float>(
         args.volume_scale * (args.V0 - state->V));
+    const float volume = ratio == 1.0f ? inherited_volume : inherited_volume * ratio;
+    const float interaction = ratio == 1.0f ? args.interaction_coeff : args.interaction_coeff * ratio;
 
     const int row_len = B + 2;
     const int plane_words = kSlabSrcRows * row_len;
@@ -226,7 +230,7 @@ void k_update_periodic_slab_walk_fast(UpdateArgs3D args) {
                             - bulk * centre * (1.0f - centre)
                                   * (1.0f - 2.0f * centre)
                             + volume * centre
-                            - args.interaction_coeff * centre * other
+                            - interaction * centre * other
                             - (velocity_x * gx + velocity_y * gy
                                + velocity_z * gz);
                         const float next = centre + args.dt * rhs;
@@ -313,7 +317,7 @@ void k_update_periodic_slab_walk_fast(UpdateArgs3D args) {
             const float rhs = gamma * lap
                 - bulk * centre * (1.0f - centre) * (1.0f - 2.0f * centre)
                 + volume * centre
-                - args.interaction_coeff * centre * other
+                - interaction * centre * other
                 - (velocity_x * gx + velocity_y * gy + velocity_z * gz);
             const float next = centre + args.dt * rhs;
             if (!isfinite(next)) {

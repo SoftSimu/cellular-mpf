@@ -322,7 +322,9 @@ struct CellRecord3D {
     std::int32_t pending_shift_z;
     // Aligned edge of this cell's serialized phase cube.
     std::uint32_t storage_edge;
-    std::uint32_t reserved32;
+    // Zero inherits ParamsRecord3D::phase_field_mobility. Older checkpoints
+    // wrote this slot as zero; older readers reject positive overrides.
+    float M_pf;
     std::uint64_t reserved64[8];          // write as zero
 };
 
@@ -434,8 +436,8 @@ static_assert(offsetof(CellRecord3D, pending_shift_x) == 172,
               "3D pending-shift offset drift");
 static_assert(offsetof(CellRecord3D, storage_edge) == 184,
               "3D storage-edge offset drift");
-static_assert(offsetof(CellRecord3D, reserved32) == 188,
-              "3D reserved32 offset drift");
+static_assert(offsetof(CellRecord3D, M_pf) == 188,
+              "3D per-cell mobility offset drift");
 static_assert(offsetof(CellRecord3D, reserved64) == 192,
               "3D reserved64 offset drift");
 

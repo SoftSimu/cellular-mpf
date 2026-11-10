@@ -84,6 +84,7 @@ struct RunOptions3D {
     std::string trajectory_path;
     std::string checkpoint_dir;
     std::string initial_centres_path;
+    std::string phase_field_mobility_map;
     std::string boundary_path;
     long long boundary_interval = 0;
     boundary::Projection boundary_projection = boundary::Projection::Maximum;
@@ -127,6 +128,7 @@ private:
                   int requested_brick_edge, bool need_initial_centres,
                   std::optional<int> checkpoint_measure_shards);
     bool initialize_common();
+    bool prepare_cell_mobility();
     bool initialize_fields();
     bool reconstruct_current_S();
     bool refresh_measurements(bool apply_tumble,
@@ -204,6 +206,7 @@ private:
     int phase_recorded_ = 0;
     bool phase_active_ = false;
     std::uint64_t steps_done_ = 0;
+    std::uint64_t mobility_hash_ = 0;
     bool volume_current_ = true;
     bool surface_current_ = true;
     CellSelection3D selection_{};

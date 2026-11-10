@@ -54,6 +54,8 @@ Slab motion is horizontal: both propulsion and interaction-induced velocity have
 
 These settings are stored in checkpoints and trajectory metadata. Parameter records use an optional 16-byte extension for mobility and reference height; checkpoints without it retain M=0.5 and the original target volume. Older executables reject the extended record rather than silently dropping its parameters.
 
+For cell-specific relaxation, `--phase-field-mobility-map path` reads rows of `global_id M` with optional `#` comments. Values are absolute positive mobilities. The override multiplies every passive term, including wall repulsion, but not advection, polarity, or the interaction velocity. On restart, listed cells are replaced and unlisted cells retain their stored values. Omitting the map preserves all overrides. Checkpoints store each override; zero in that record means inherit the uniform mobility. A trajectory header identifies the assignment by a hash, preventing an altered assignment from being appended to an existing trajectory. Use a new output path when branching a checkpoint into a different mobility condition.
+
 ## Save and continue
 
 The trajectory records positions, velocities and shape measurements.

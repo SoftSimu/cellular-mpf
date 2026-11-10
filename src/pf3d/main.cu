@@ -57,6 +57,8 @@ void usage(const char* program) {
         "  --lambda <f>              interface-width parameter               (7)\n"
         "  --kappa <f>               cell-cell repulsion strength            (10)\n"
         "  --mu <f>                  volume-constraint strength              (1)\n"
+        "  --phase-field-mobility-map <path>  rows: cell_id M; overrides only\n"
+        "                            listed cells, including on resume\n"
         "  --xi <f>                  friction                                (1500)\n"
         "  --tau <f>                 mean run time                            (1e4)\n"
         "  --v-A <f>                 active speed                            (1e-2)\n"
@@ -591,6 +593,18 @@ OptionStatus parse_execution_option(int argc, char** argv, int* index,
     return OptionStatus::Unrecognized;
 }
 
+OptionStatus parse_cell_property_option(int argc, char** argv, int* index,
+                                       const char* argument,
+                                       ParsedCommand* command) {
+    if (std::strcmp(argument, "--phase-field-mobility-map") == 0) {
+        const char* value = value_after(argc, argv, index, argument);
+        if (!value || value[0] == '\0') return OptionStatus::Error;
+        command->options.phase_field_mobility_map = value;
+        return OptionStatus::Accepted;
+    }
+    return OptionStatus::Unrecognized;
+}
+
 OptionStatus parse_trajectory_option(int argc, char** argv, int* index,
                                      const char* argument,
                                      ParsedCommand* command) {
@@ -738,6 +752,7 @@ CommandStatus parse_command_line(int argc, char** argv,
     static const OptionParser parsers[] = {
         parse_fresh_parameter_option,
         parse_execution_option,
+        parse_cell_property_option,
         parse_trajectory_option,
         parse_boundary_option,
         parse_surface_option,

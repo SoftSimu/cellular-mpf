@@ -137,7 +137,10 @@ struct alignas(64) CellState3D {
     // deliberately absent from the restart contract.
     double wall_overlap;
     double outside_slit_volume;
-    std::uint32_t reserved[10];
+    // Zero inherits the run-wide Allen--Cahn mobility; positive values are
+    // cell-specific and multiply only the passive field equation.
+    float M_pf;
+    std::uint32_t reserved[9];
 };
 
 static_assert(sizeof(CellState3D) == 256, "CellState3D checkpoint ABI drift");
@@ -326,6 +329,7 @@ struct UpdateArgs3D {
     float bulk_scale;
     float interaction_coeff;
     float mobility_scale = 1.0f;
+    float uniform_mobility = 0.5f;
     // Exact destination surface measurement is an additional tiled pass.
     // Normal stepping leaves this false; output paths measure the current
     // field explicitly through MeasureArgs3D::compute_surface.

@@ -337,6 +337,7 @@ ckpt3d::CellRecord3D record_from_cell(const CellState3D& c,
     r.pending_shift_y = c.pending_shift_y;
     r.pending_shift_z = c.pending_shift_z;
     r.storage_edge = static_cast<std::uint32_t>(storage_edge);
+    r.M_pf = c.M_pf;
     return r;
 }
 
@@ -355,6 +356,7 @@ CellState3D cell_from_record(const ckpt3d::CellRecord3D& r, int base_edge) {
     c.gamma = r.gamma;
     c.v_A = r.v_A;
     c.R_tgt = r.target_radius;
+    c.M_pf = r.M_pf;
     c.phi_max = r.phi_max;
     c.V = r.volume;
     c.Cx = r.moment_x;
@@ -384,7 +386,7 @@ CellState3D cell_from_record(const ckpt3d::CellRecord3D& r, int base_edge) {
 bool record_storage_edge(const ckpt3d::CellRecord3D& r,
                          int base_edge, int domain_edge, int* out) {
     if (!out) return false;
-    if (r.reserved32 != 0 ||
+    if (!std::isfinite(r.M_pf) || r.M_pf < 0.0f ||
         !ckpt3d::valid_storage_edge(r.storage_edge,
                                     static_cast<std::uint32_t>(base_edge),
                                     static_cast<std::uint64_t>(domain_edge))) {

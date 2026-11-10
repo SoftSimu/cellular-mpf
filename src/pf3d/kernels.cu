@@ -660,13 +660,17 @@ __device__ void process_update_cell(int n, const UpdateArgs3D& args,
     const int origin_y = wrap_origin(state->origin_y, args.layout.ny);
     // Load cell-wide values once because pointer aliasing prevents reliable
     // compiler hoisting inside the voxel loop.
-    const float gamma = state->gamma * args.mobility_scale;
+    const float ratio = state->M_pf == 0.0f ? 1.0f : state->M_pf / args.uniform_mobility;
+    const float gamma = ratio == 1.0f ? state->gamma * args.mobility_scale
+                                     : (state->gamma * args.mobility_scale) * ratio;
     const float velocity_x = state->velocity_x;
     const float velocity_y = state->velocity_y;
     const float velocity_z = state->velocity_z;
     const float bulk = args.bulk_scale * gamma;
-    const float volume = static_cast<float>(
+    const float inherited_volume = static_cast<float>(
         args.volume_scale * (args.V0 - state->V));
+    const float volume = ratio == 1.0f ? inherited_volume : inherited_volume * ratio;
+    const float interaction = ratio == 1.0f ? args.interaction_coeff : args.interaction_coeff * ratio;
 
     [[maybe_unused]] Reduction3D local{};
     if constexpr (CollectMoments) {
@@ -747,7 +751,7 @@ __device__ void process_update_cell(int n, const UpdateArgs3D& args,
                 const float rhs = gamma * lap
                     - bulk * centre * (1.0f - centre) * (1.0f - 2.0f * centre)
                     + volume * centre
-                    - args.interaction_coeff * centre * other
+                    - interaction * centre * other
                     - (velocity_x * gx + velocity_y * gy
                        + velocity_z * gz);
                 const float next = centre + args.dt * rhs;
@@ -961,13 +965,17 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         const int storage_z_offset = args.storage.compact(B)
             ? static_cast<int>(origin_z) : 0;
         // Constant for the whole brick; see process_update_cell.
-        const float gamma = state->gamma * args.mobility_scale;
+        const float ratio = state->M_pf == 0.0f ? 1.0f : state->M_pf / args.uniform_mobility;
+        const float gamma = ratio == 1.0f ? state->gamma * args.mobility_scale
+                                         : (state->gamma * args.mobility_scale) * ratio;
         const float velocity_x = state->velocity_x;
         const float velocity_y = state->velocity_y;
         const float velocity_z = state->velocity_z;
         const float bulk = args.bulk_scale * gamma;
-        const float volume = static_cast<float>(
+        const float inherited_volume = static_cast<float>(
             args.volume_scale * (args.V0 - state->V));
+        const float volume = ratio == 1.0f ? inherited_volume : inherited_volume * ratio;
+        const float interaction = ratio == 1.0f ? args.interaction_coeff : args.interaction_coeff * ratio;
         const int tiles_x = (B + kBrickX - 1) / kBrickX;
         const unsigned aggregate_limit = BoundedAggregate
             ? args.aggregate_bound->contribution_limit : UINT32_MAX;
@@ -1144,7 +1152,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                         other += weighted_wall_field<true>(args.wall, wz);
                     const float rhs = gamma * lap -
                                       bulk * centre * (1.0f - centre) * (1.0f - 2.0f * centre) +
-                                      volume * centre - args.interaction_coeff * centre * other -
+                                      volume * centre - interaction * centre * other -
                                       (velocity_x * gx + velocity_y * gy + velocity_z * gz);
                     const float next = centre + args.dt * rhs;
                     if (!isfinite(next)) {

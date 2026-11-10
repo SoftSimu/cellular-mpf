@@ -12,6 +12,7 @@
 #include "../../include/pf3d/update_shards.hpp"
 #include "../../include/pf3d/brick_classes.hpp"
 #include "../../include/pf3d/trajectory_header.hpp"
+#include "../../include/pf3d/mobility_map.hpp"
 #include "../../include/pf3d/reference.hpp"
 #include "../../include/palmieri_initializer.hpp"
 #include "../../include/pf3d/aggregate_coverage.cuh"
@@ -814,7 +815,7 @@ bool Sim3D::init_fresh(const SimParams3D& params,
         return false;
     steps_done_ = 0;
     if (!initialize_fields()) return false;
-    if (!initialize_common()) return false;
+    if (!prepare_cell_mobility() || !initialize_common()) return false;
     return true;
 }
 
@@ -903,7 +904,7 @@ bool Sim3D::init_checkpoint(const CheckpointMeta3D& checkpoint,
         !refresh_measurements(false, true) ||
         !synchronize_and_check("checkpoint restore"))
         return false;
-    if (!initialize_common()) return false;
+    if (!prepare_cell_mobility() || !initialize_common()) return false;
     if (reduction.policy != checkpoint.promoted_measure_reduction.policy) {
         std::fprintf(stderr,
             "[3d] promoted measurement regrouping enabled: policy %d -> %d; "
@@ -1239,6 +1240,79 @@ bool Sim3D::initialize_fields() {
         return false;
     cudaFree(d_centres_);
     d_centres_ = nullptr;
+    return true;
+}
+
+bool Sim3D::prepare_cell_mobility() {
+    std::vector<CellState3D> cells(static_cast<std::size_t>(params_.num_cells));
+    if (!gpu_ok(cudaMemcpyAsync(cells.data(), d_cells_, cells.size()*sizeof(CellState3D),
+                               cudaMemcpyDeviceToHost, stream_), "read cell mobilities") ||
+        !gpu_ok(cudaStreamSynchronize(stream_), "read cell mobilities")) return false;
+    std::map<std::int64_t, std::size_t> ids;
+    for (std::size_t i=0; i<cells.size(); ++i) {
+        if (!ids.emplace(cells[i].global_id, i).second) {
+            std::fprintf(stderr, "[3d] duplicate cell id in mobility assignment\n");
+            return false;
+        }
+    }
+    if (!options_.phase_field_mobility_map.empty()) {
+        std::map<std::int64_t, float> values;
+        std::string error;
+        if (!read_mobility_map(options_.phase_field_mobility_map, &values, &error)) {
+            std::fprintf(stderr, "[3d] %s\n", error.c_str());
+            return false;
+        }
+        for (const auto& entry : values) {
+            const auto found = ids.find(entry.first);
+            if (found == ids.end()) {
+                std::fprintf(stderr, "[3d] mobility map names unknown cell %lld\n",
+                             static_cast<long long>(entry.first));
+                return false;
+            }
+            // Unlisted cells retain their stored override or inherited value.
+            cells[found->second].M_pf = entry.second;
+        }
+    }
+    double maximum_mobility = 0.0;
+    bool explicit_mobility = false;
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    auto append_word = [&hash](std::uint64_t word, int bytes) {
+        for (int j=0; j<bytes; ++j) {
+            hash ^= (word >> (8*j)) & 255u;
+            hash *= UINT64_C(1099511628211);
+        }
+    };
+    for (const auto& entry : ids) {
+        const auto& cell = cells[entry.second];
+        if (!std::isfinite(cell.M_pf) || cell.M_pf < 0.0f) {
+            std::fprintf(stderr, "[3d] invalid per-cell phase-field mobility\n");
+            return false;
+        }
+        const double mobility = cell.M_pf == 0.0f ? params_.phase_field_mobility : cell.M_pf;
+        SimParams3D bound = params_;
+        bound.phase_field_mobility = mobility;
+        bound.gamma_normal = bound.gamma_cancer = cell.gamma;
+        const char* error = nullptr;
+        if (!validate(bound, &error)) {
+            std::fprintf(stderr, "[3d] cell %lld mobility stability bound: %s\n",
+                         static_cast<long long>(cell.global_id), error);
+            return false;
+        }
+        maximum_mobility = std::max(maximum_mobility, mobility);
+        explicit_mobility = explicit_mobility || cell.M_pf != 0.0f;
+        std::uint32_t bits;
+        std::memcpy(&bits, &cell.M_pf, sizeof(bits));
+        append_word(static_cast<std::uint64_t>(cell.global_id), 8);
+        append_word(bits, 4);
+    }
+    mobility_hash_ = explicit_mobility ? hash : 0;
+    if (!options_.phase_field_mobility_map.empty() &&
+        (!gpu_ok(cudaMemcpyAsync(d_cells_, cells.data(), cells.size()*sizeof(CellState3D),
+                                cudaMemcpyHostToDevice, stream_), "assign cell mobilities") ||
+         !gpu_ok(cudaStreamSynchronize(stream_), "assign cell mobilities"))) return false;
+    if (mobility_hash_)
+        std::printf("[3d] per-cell mobility hash %016llx; maximum M %.9g\n",
+                    static_cast<unsigned long long>(mobility_hash_), maximum_mobility);
     return true;
 }
 
@@ -1608,6 +1682,7 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     update.dt = static_cast<float>(params_.dt);
     update.V0 = params_.volume0();
     update.mobility_scale = static_cast<float>(2.0 * params_.phase_field_mobility);
+    update.uniform_mobility = static_cast<float>(params_.phase_field_mobility);
     update.volume_scale = params_.volume() * (2.0 * params_.phase_field_mobility);
     update.bulk_scale = static_cast<float>(params_.bulk());
     update.interaction_coeff = static_cast<float>(params_.interaction() *
@@ -1906,10 +1981,16 @@ bool Sim3D::open_trajectory() {
                      ec.message().c_str());
         return false;
     }
-    const std::string expected_header = trajectory_header(
+    std::string expected_header = trajectory_header(
         params_, B_, options_.promoted_measure_shards,
         options_.promoted_measure_auto_wave_ctas, measurement_shards_,
         trajectory_every_);
+    if (mobility_hash_) {
+        char token[64];
+        std::snprintf(token, sizeof(token), " mobility_hash=%016llx",
+                      static_cast<unsigned long long>(mobility_hash_));
+        expected_header += token;
+    }
     const char* const expected_columns = trajectory_columns(params_);
     if (expected_header.empty()) {
         std::fprintf(stderr, "[3d] trajectory metadata is too long\n");
