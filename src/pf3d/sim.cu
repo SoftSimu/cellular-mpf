@@ -26,6 +26,8 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -815,7 +817,7 @@ bool Sim3D::init_fresh(const SimParams3D& params,
         return false;
     steps_done_ = 0;
     if (!initialize_fields()) return false;
-    if (!prepare_cell_mobility() || !initialize_common()) return false;
+    if (!prepare_cell_properties() || !initialize_common()) return false;
     return true;
 }
 
@@ -904,7 +906,7 @@ bool Sim3D::init_checkpoint(const CheckpointMeta3D& checkpoint,
         !refresh_measurements(false, true) ||
         !synchronize_and_check("checkpoint restore"))
         return false;
-    if (!prepare_cell_mobility() || !initialize_common()) return false;
+    if (!prepare_cell_properties() || !initialize_common()) return false;
     if (reduction.policy != checkpoint.promoted_measure_reduction.policy) {
         std::fprintf(stderr,
             "[3d] promoted measurement regrouping enabled: policy %d -> %d; "
@@ -1243,18 +1245,28 @@ bool Sim3D::initialize_fields() {
     return true;
 }
 
-bool Sim3D::prepare_cell_mobility() {
+bool Sim3D::prepare_cell_properties() {
     std::vector<CellState3D> cells(static_cast<std::size_t>(params_.num_cells));
     if (!gpu_ok(cudaMemcpyAsync(cells.data(), d_cells_, cells.size()*sizeof(CellState3D),
                                cudaMemcpyDeviceToHost, stream_), "read cell mobilities") ||
         !gpu_ok(cudaStreamSynchronize(stream_), "read cell mobilities")) return false;
     std::map<std::int64_t, std::size_t> ids;
     for (std::size_t i=0; i<cells.size(); ++i) {
+        if (cells[i].record_planar_motion != cells.front().record_planar_motion) {
+            std::fprintf(stderr, "[3d] inconsistent per-cell motion-recording flags\n");
+            return false;
+        }
         if (!ids.emplace(cells[i].global_id, i).second) {
             std::fprintf(stderr, "[3d] duplicate cell id in mobility assignment\n");
             return false;
         }
     }
+    const bool enable_motion = options_.record_planar_motion &&
+                               cells.front().record_planar_motion == 0;
+    options_.record_planar_motion = options_.record_planar_motion ||
+                                   cells.front().record_planar_motion != 0;
+    if (enable_motion)
+        for (auto& cell : cells) cell.record_planar_motion = 1;
     if (!options_.phase_field_mobility_map.empty()) {
         std::map<std::int64_t, float> values;
         std::string error;
@@ -1306,7 +1318,7 @@ bool Sim3D::prepare_cell_mobility() {
         append_word(bits, 4);
     }
     mobility_hash_ = explicit_mobility ? hash : 0;
-    if (!options_.phase_field_mobility_map.empty() &&
+    if ((!options_.phase_field_mobility_map.empty() || enable_motion) &&
         (!gpu_ok(cudaMemcpyAsync(d_cells_, cells.data(), cells.size()*sizeof(CellState3D),
                                 cudaMemcpyHostToDevice, stream_), "assign cell mobilities") ||
          !gpu_ok(cudaStreamSynchronize(stream_), "assign cell mobilities"))) return false;
@@ -1497,6 +1509,8 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
     measure.max_shift = kMaximumShiftPerStep;
     measure.support_margin = static_cast<int>(kBrickSafetyMargin);
     measure.apply_tumble = apply_tumble;
+    measure.integrate_motion_dt = apply_tumble && options_.record_planar_motion
+        ? params_.dt : 0.0;
     measure.compute_surface = compute_surface;
     measure.storage = field_storage_;
     if (!launch_measure_cells_only(measure, stream_)) {
@@ -1991,7 +2005,12 @@ bool Sim3D::open_trajectory() {
                       static_cast<unsigned long long>(mobility_hash_));
         expected_header += token;
     }
-    const char* const expected_columns = trajectory_columns(params_);
+    std::string expected_columns = trajectory_columns(params_);
+    if (options_.record_planar_motion) {
+        expected_header += " planar_motion_integral=1";
+        expected_columns += " propulsion_integral_x propulsion_integral_y"
+                            " advection_integral_x advection_integral_y";
+    }
     if (expected_header.empty()) {
         std::fprintf(stderr, "[3d] trajectory metadata is too long\n");
         return false;
@@ -2019,7 +2038,7 @@ bool Sim3D::open_trajectory() {
             return false;
         }
         if (std::fprintf(trajectory_file_, "%s\n%s\n",
-                         expected_header.c_str(), expected_columns) < 0 ||
+                         expected_header.c_str(), expected_columns.c_str()) < 0 ||
             std::fflush(trajectory_file_) != 0) {
             close_trajectory();
             return false;
@@ -2053,7 +2072,7 @@ bool Sim3D::open_trajectory() {
     std::memcpy(first_line, line, sizeof(line));
     if (!read_line() ||
         !trajectory_metadata_compatible(first_line, line, expected_header,
-                                        expected_columns)) {
+                                        expected_columns.c_str())) {
         std::fprintf(stderr,
             "[3d] refusing to append: trajectory metadata does not match this run\n");
         close_trajectory();
@@ -2068,30 +2087,17 @@ bool Sim3D::open_trajectory() {
             close_trajectory();
             return false;
         }
-        double values[20]{};
+        double values[24]{};
         long long global_id = 0;
         char extra = '\0';
-        const int parsed = params_.resolved_wall_channel()
-            ? std::sscanf(
-                  line,
-                  "%lf %lld %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf "
-                  "%lf %lf %lf %lf %lf %lf %lf %lf %c",
-                  &values[0], &global_id, &values[1], &values[2], &values[3],
-                  &values[4], &values[5], &values[6], &values[7], &values[8],
-                  &values[9], &values[10], &values[11], &values[12],
-                  &values[13], &values[14], &values[15], &values[16],
-                  &values[17], &values[18], &values[19], &extra)
-            : std::sscanf(
-                  line,
-                  "%lf %lld %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf "
-                  "%lf %lf %lf %lf %c",
-                  &values[0], &global_id, &values[1], &values[2], &values[3],
-                  &values[4], &values[5], &values[6], &values[7], &values[8],
-                  &values[9], &values[10], &values[11], &values[12],
-                  &values[13], &values[14], &values[15], &extra);
-        const int expected_values = params_.resolved_wall_channel() ? 21 : 17;
-        const int finite_values = params_.resolved_wall_channel() ? 20 : 16;
-        bool finite = parsed == expected_values;
+        const int finite_values = (params_.resolved_wall_channel() ? 20 : 16) +
+                                  (options_.record_planar_motion ? 4 : 0);
+        std::istringstream row(line);
+        row.imbue(std::locale::classic());
+        bool finite = static_cast<bool>(row >> values[0] >> global_id);
+        for (int k = 1; k < finite_values; ++k)
+            finite = static_cast<bool>(row >> values[k]) && finite;
+        if (row >> extra) finite = false;
         for (int k = 0; k < finite_values; ++k)
             finite = finite && std::isfinite(values[k]);
         if (!finite) {
@@ -2212,14 +2218,21 @@ bool Sim3D::append_trajectory() {
             static_cast<double>(cell.phi_max));
         const int suffix_written = params_.resolved_wall_channel()
             ? std::fprintf(
-                  trajectory_file_, " %.17g %.17g %.17g %.17g\n",
+                  trajectory_file_, " %.17g %.17g %.17g %.17g",
                   cell.wall_overlap,
                   cell.volume > 0.0 ? cell.wall_overlap / cell.volume : 0.0,
                   cell.outside_slit_volume,
                   cell.volume > 0.0
                       ? cell.outside_slit_volume / cell.volume : 0.0)
-            : std::fputc('\n', trajectory_file_);
-        if (base_written < 0 || suffix_written < 0) {
+            : 0;
+        const auto& motion = cell.planar_motion;
+        const int motion_written = options_.record_planar_motion
+            ? std::fprintf(trajectory_file_, " %.17g %.17g %.17g %.17g",
+                motion.propulsion_x, motion.propulsion_y,
+                motion.advection_x, motion.advection_y)
+            : 0;
+        if (base_written < 0 || suffix_written < 0 || motion_written < 0 ||
+            std::fputc('\n', trajectory_file_) < 0) {
             std::fprintf(stderr, "[3d] failed to write trajectory frame\n");
             return false;
         }

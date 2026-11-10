@@ -49,6 +49,7 @@ struct RunOptions3D {
     double memory_fraction = 0.95;
     int device = 0;
     bool strict = false;
+    bool record_planar_motion = false;
     bool final_checkpoint = true;
     int bench_steps = 0;
     // After the plain benchmark, repeat it with per-phase CUDA-event timing
@@ -128,7 +129,7 @@ private:
                   int requested_brick_edge, bool need_initial_centres,
                   std::optional<int> checkpoint_measure_shards);
     bool initialize_common();
-    bool prepare_cell_mobility();
+    bool prepare_cell_properties();
     bool initialize_fields();
     bool reconstruct_current_S();
     bool refresh_measurements(bool apply_tumble,

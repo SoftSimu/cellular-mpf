@@ -338,6 +338,11 @@ ckpt3d::CellRecord3D record_from_cell(const CellState3D& c,
     r.pending_shift_z = c.pending_shift_z;
     r.storage_edge = static_cast<std::uint32_t>(storage_edge);
     r.M_pf = c.M_pf;
+    r.record_planar_motion = c.record_planar_motion;
+    r.propulsion_integral_x = c.planar_motion.propulsion_x;
+    r.propulsion_integral_y = c.planar_motion.propulsion_y;
+    r.advection_integral_x = c.planar_motion.advection_x;
+    r.advection_integral_y = c.planar_motion.advection_y;
     return r;
 }
 
@@ -357,6 +362,9 @@ CellState3D cell_from_record(const ckpt3d::CellRecord3D& r, int base_edge) {
     c.v_A = r.v_A;
     c.R_tgt = r.target_radius;
     c.M_pf = r.M_pf;
+    c.record_planar_motion = static_cast<std::uint32_t>(r.record_planar_motion);
+    c.planar_motion = {r.propulsion_integral_x, r.propulsion_integral_y,
+                       r.advection_integral_x, r.advection_integral_y};
     c.phi_max = r.phi_max;
     c.V = r.volume;
     c.Cx = r.moment_x;
@@ -408,6 +416,13 @@ bool cell_record_valid(const ckpt3d::CellRecord3D& r,
         r, base_edge, domain_edge, &edge);
     for (std::uint64_t value : r.reserved64)
         reserved_zero = reserved_zero && value == 0;
+    const bool integrals_valid = r.record_planar_motion <= 1 &&
+        std::isfinite(r.propulsion_integral_x) && std::isfinite(r.propulsion_integral_y) &&
+        std::isfinite(r.advection_integral_x) && std::isfinite(r.advection_integral_y) &&
+        (r.record_planar_motion || (r.propulsion_integral_x == 0.0 &&
+          r.propulsion_integral_y == 0.0 && r.advection_integral_x == 0.0 &&
+          r.advection_integral_y == 0.0));
+    reserved_zero = reserved_zero && integrals_valid;
     const bool bounds_valid =
         r.bbox_lo_x >= 0 && r.bbox_lo_x <= r.bbox_hi_x && r.bbox_hi_x < edge &&
         r.bbox_lo_y >= 0 && r.bbox_lo_y <= r.bbox_hi_y && r.bbox_hi_y < edge &&

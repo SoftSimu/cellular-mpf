@@ -325,7 +325,12 @@ struct CellRecord3D {
     // Zero inherits ParamsRecord3D::phase_field_mobility. Older checkpoints
     // wrote this slot as zero; older readers reject positive overrides.
     float M_pf;
-    std::uint64_t reserved64[8];          // write as zero
+    // Optional in-plane velocity integrals. Zero flag and values represent an
+    // older or unrecorded state; enabled records persist across continuation.
+    std::uint64_t record_planar_motion;
+    double propulsion_integral_x, propulsion_integral_y;
+    double advection_integral_x, advection_integral_y;
+    std::uint64_t reserved64[3];          // write as zero
 };
 
 #pragma pack(pop)
@@ -438,7 +443,11 @@ static_assert(offsetof(CellRecord3D, storage_edge) == 184,
               "3D storage-edge offset drift");
 static_assert(offsetof(CellRecord3D, M_pf) == 188,
               "3D per-cell mobility offset drift");
-static_assert(offsetof(CellRecord3D, reserved64) == 192,
+static_assert(offsetof(CellRecord3D, record_planar_motion) == 192,
+              "3D planar motion flag offset drift");
+static_assert(offsetof(CellRecord3D, propulsion_integral_x) == 200,
+              "3D planar integral offset drift");
+static_assert(offsetof(CellRecord3D, reserved64) == 232,
               "3D reserved64 offset drift");
 
 inline bool host_is_little_endian() {

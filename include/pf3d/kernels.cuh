@@ -15,6 +15,7 @@
 
 #include "params.cuh"
 #include "phase_storage.hpp"
+#include "motion_integral.hpp"
 #include "rng.cuh"
 #include "tile_partition.cuh"
 
@@ -140,13 +141,16 @@ struct alignas(64) CellState3D {
     // Zero inherits the run-wide Allen--Cahn mobility; positive values are
     // cell-specific and multiply only the passive field equation.
     float M_pf;
-    std::uint32_t reserved[9];
+    std::uint32_t record_planar_motion;
+    PlanarMotionIntegral planar_motion;
 };
 
 static_assert(sizeof(CellState3D) == 256, "CellState3D checkpoint ABI drift");
 static_assert(alignof(CellState3D) == 64, "CellState3D alignment drift");
 static_assert(offsetof(CellState3D, storage_edge) == 192,
               "CellState3D storage offset drift");
+static_assert(offsetof(CellState3D, planar_motion) == 224,
+              "CellState3D planar-integral offset drift");
 
 PF3D_HD constexpr int cell_support_edge(const CellState3D& cell,
                                         int base_edge) {
@@ -298,6 +302,8 @@ struct MeasureArgs3D {
     // False is useful for a post-restart diagnostic measurement that must not
     // consume the step's tumble decision.
     bool apply_tumble;
+    // Nonzero only for a candidate update, never an output measurement.
+    double integrate_motion_dt = 0.0;
     // Surface needs the already-computed gradient but adds a square root per
     // voxel; evaluate it only on the configured full-moment/output cadence.
     bool compute_surface;
@@ -359,6 +365,7 @@ struct TrajPackedCell3D {
     float polarity_x, polarity_y, polarity_z;
     float gamma, v_A;
     float phi_max;
+    PlanarMotionIntegral planar_motion;
 };
 
 struct VerifyCell3D {

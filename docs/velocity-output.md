@@ -1,4 +1,37 @@
-# Two-dimensional velocity components
+# Velocity components
+
+## Three-dimensional in-plane displacements
+
+`cell_gh200_3d` and `cell_gh200_3d_two_gpu` accept
+`--record-planar-motion`. This adds four cumulative columns to the ordinary
+trajectory: `propulsion_integral_x/y` and `advection_integral_x/y`.
+They integrate the applied in-plane active component and the stored total
+advection velocity over every accepted step, in double precision. The
+integration timestep is the model timestep in the trajectory metadata.
+
+For two frames, differences of these columns give the active and total
+advective displacements. Their difference is interaction advection, including
+the rounding of the stored total velocity. Subtracting total advection from
+the measured centroid displacement gives the remaining centroid motion.
+Interpreting that remainder as passive field relaxation requires checking
+the discrete-advection and finite-Euler corrections; it is not an independent
+spatial measurement of the variational terms.
+
+The integrals and enabled flag are checkpointed. Recording begins with zero
+integrals when first enabled; a continuation restores both the values and
+enabled state without repeating the flag. Older checkpoints have no recorded
+history. Use differences within a continuous recorded segment, not absolute
+values across an older, unrecorded checkpoint.
+
+Passive preparation contributes no propulsion. Output measurements do not
+increment the integrals. Rejected updates roll them back with the accepted
+cell state before retry. An optional per-cell GPU pass observes the already
+computed velocity, leaving the physics arithmetic unchanged; it performs no
+host transfer or synchronization. With recording disabled, no observer pass
+is launched. The four columns describe x/y motion for all geometries, not
+the full displacement in a periodic three-dimensional system.
+
+## Two-dimensional spatial decomposition
 
 The optional recorder measures the contributions to the phase-field centroid
 velocity. It uses the actual field, interaction sum and imposed direction

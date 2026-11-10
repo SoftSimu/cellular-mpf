@@ -166,7 +166,10 @@ def read_checkpoint(
             ):
                 raise ValueError(f"invalid storage edge {edge} for cell {global_id}")
             cell_mobility = struct.unpack_from("<f", record, 188)[0]
-            if not math.isfinite(cell_mobility) or cell_mobility < 0 or any(record[192:256]):
+            motion_flag, *integrals = struct.unpack_from("<Q4d", record, 192)
+            if (not math.isfinite(cell_mobility) or cell_mobility < 0
+                    or motion_flag > 1 or not all(math.isfinite(v) for v in integrals)
+                    or (not motion_flag and any(integrals)) or any(record[232:256])):
                 raise ValueError(f"nonzero reserved data for cell {global_id}")
             if not math.isfinite(volume) or volume <= 0:
                 raise ValueError(f"invalid volume for cell {global_id}")

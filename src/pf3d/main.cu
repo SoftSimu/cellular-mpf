@@ -111,6 +111,8 @@ void usage(const char* program) {
         "                            preserves loaded fields and tumble state,\n"
         "                            but permits floating-point regrouping\n"
         "  --strict                  enable scheduled invariant verification\n"
+        "  --record-planar-motion    integrate applied xy velocities each step;\n"
+        "                            checkpointed, restored automatically on resume\n"
         "  --print-interval <int>    status cadence in steps; 0 disables     (100)\n"
         "\n"
         "trajectory output\n"
@@ -588,6 +590,10 @@ OptionStatus parse_execution_option(int argc, char** argv, int* index,
     }
     if (std::strcmp(argument, "--strict") == 0) {
         options.strict = true;
+        return OptionStatus::Accepted;
+    }
+    if (std::strcmp(argument, "--record-planar-motion") == 0) {
+        options.record_planar_motion = true;
         return OptionStatus::Accepted;
     }
     return OptionStatus::Unrecognized;

@@ -1371,7 +1371,8 @@ __global__ void k_initialize_spheres(InitArgs3D args) {
         state->surface = state->Ix = state->Iy = state->Iz = 0.0;
         state->wall_overlap = state->outside_slit_volume = 0.0;
         state->phi_max = 0.0f;
-        for (unsigned& value : state->reserved) value = 0u;
+        state->record_planar_motion = 0;
+        state->planar_motion = {};
     }
     __syncthreads();
 
@@ -2252,6 +2253,19 @@ __global__ void k_apply_cell_motion(MeasureArgs3D args) {
     if (tumbled) ++state->tumble_ctr;
 }
 
+__global__ void k_integrate_planar_motion(MeasureArgs3D args) {
+    const int slot = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (slot >= args.selection.selected_count(args.N)) return;
+    CellState3D* state = &args.cells[args.selection.cell_index(slot)];
+    if (!state->record_planar_motion || fatal_flags_present(state, args.global_flags)) return;
+    const float speed = *args.step >= args.aging_steps ? state->v_A : 0.0f;
+    // Keep observation separate so it cannot change contraction/order in the
+    // velocity calculation. Rejected updates restore these provisional sums
+    // with the rest of the accepted cell state before adaptive retry.
+    state->planar_motion.advance(args.integrate_motion_dt, speed,
+        state->polarity_x, state->polarity_y, state->velocity_x, state->velocity_y);
+}
+
 template <bool WallCoupling>
 __global__ __launch_bounds__(kThreads3D, 1)
 void k_update_tiled_impl(UpdateArgs3D args) {
@@ -2825,6 +2839,7 @@ __global__ void k_pack_trajectory(const CellState3D* cells,
     record.gamma = state.gamma;
     record.v_A = state.v_A;
     record.phi_max = state.phi_max;
+    record.planar_motion = state.planar_motion;
     out[n] = record;
 }
 
@@ -3370,6 +3385,8 @@ void launch_apply_cell_motion(const MeasureArgs3D& args,
         ((args.apply_tumble || args.aging_steps != 0u) && args.step == nullptr))
         return;
     k_apply_cell_motion<<<(count + 127) / 128, 128, 0, stream>>>(args);
+    if (args.apply_tumble && args.integrate_motion_dt > 0.0)
+        k_integrate_planar_motion<<<(count + 127) / 128, 128, 0, stream>>>(args);
 }
 
 bool launch_update_tiled(const UpdateArgs3D& args, int grid_blocks,
