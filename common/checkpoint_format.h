@@ -13,12 +13,27 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <cmath>
+#include <limits>
 
 namespace ckpt {
 
 constexpr uint32_t MAGIC = 0x43454C4C;  // 'CELL'
 constexpr uint32_t CHECKPOINT_FORMAT = 1;  // sole supported on-disk schema
 constexpr int32_t CELL_TILE_PITCH = 288;
+
+// Derived float centroids can differ by one rounding unit after equivalent
+// moment arithmetic. Wrapping near zero also exposes double-precision error.
+inline bool centroid_matches(float stored, float expected, int side) {
+    if (side <= 0 || !std::isfinite(stored) || !std::isfinite(expected) ||
+        stored < 0 || expected < 0 || stored > side || expected > side)
+        return false;
+    double distance = std::abs(static_cast<double>(stored) - expected);
+    if (distance > side / 2.0) distance = side - distance;
+    const double ulp = static_cast<double>(std::nextafter(
+        expected, std::numeric_limits<float>::infinity())) - expected;
+    return distance <= ulp + 8 * std::numeric_limits<double>::epsilon() * side;
+}
 
 // Sidecar block magics (appear after per-cell records, in any order).
 constexpr uint32_t MAGIC_VA_A = 0x56415F41;  // 'VA_A' — per-cell v_A

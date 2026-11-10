@@ -193,6 +193,8 @@ if(BUILD_TESTING)
   target_include_directories(common_primitives_cpu_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common)
   pf_enable_warnings(common_primitives_cpu_test)
   add_test(NAME common_primitives_cpu COMMAND common_primitives_cpu_test)
+  add_test(NAME pf2d_checkpoint_centroid COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/checkpoint_centroid_test.py)
 
   if(PF_HOST_NO_CONTRACTION)
     add_executable(pf2d_mobility_model_test tests/mobility_model_cpu_test.cpp)

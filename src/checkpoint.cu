@@ -557,7 +557,8 @@ bool checkpoint_read(const std::string& path, CheckpointData* out) {
             static_cast<double>(rec.origin_y) + sc.ty0 +
                 rec.moment_y / rec.volume_moment,
             static_cast<double>(L)));
-        if (rec.cx != expected_cx || rec.cy != expected_cy) {
+        if (!ckpt::centroid_matches(rec.cx, expected_cx, L) ||
+            !ckpt::centroid_matches(rec.cy, expected_cy, L)) {
             std::fprintf(stderr,
                 "[ckpt] cell %d derived centroid is internally inconsistent\n",
                 rec.cell_id);

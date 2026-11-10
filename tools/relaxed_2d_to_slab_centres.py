@@ -245,6 +245,19 @@ def wrapped(value: float, side: int) -> float:
     return result + side if result < 0.0 else result
 
 
+def centroid_matches(stored: float, expected: float, side: int) -> bool:
+    """Allow float rounding and double-precision error in periodic wrapping."""
+    if (side <= 0 or not math.isfinite(stored) or not math.isfinite(expected)
+            or not 0 <= stored <= side or not 0 <= expected <= side):
+        return False
+    distance = abs(stored - expected)
+    distance = min(distance, side - distance)
+    bits, = struct.unpack('<I', FLOAT32.pack(expected))
+    next_value, = FLOAT32.unpack(struct.pack('<I', bits + 1))
+    tolerance = next_value - expected + 8 * sys.float_info.epsilon * side
+    return distance <= tolerance
+
+
 def read_checkpoint_prefix(stream: BinaryIO) -> CheckpointPrefix:
     prefix = CheckpointPrefix(*PREFIX.unpack(
         read_exact(stream, PREFIX.size, "fixed prefix")
@@ -403,7 +416,8 @@ def cell_centre(
         record.origin_y + shape.tile_y + record.moment_y / record.volume,
         domain_side,
     ))
-    if record.cx != expected_cx or record.cy != expected_cy:
+    if (not centroid_matches(record.cx, expected_cx, domain_side) or
+            not centroid_matches(record.cy, expected_cy, domain_side)):
         raise ExportError(
             f"derived centroid is inconsistent for global ID {record.global_id}"
         )

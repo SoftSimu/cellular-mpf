@@ -9,6 +9,7 @@
 
 #include "model_coefficients.cuh"
 #include "philox.cuh"
+#include "checkpoint_format.h"
 
 #include <array>
 #include <cstdint>
@@ -69,7 +70,19 @@ int main() {
                      {0xFFFFFFFFu, 0xFFFFFFFFu},
                      {0x408F276Du, 0x41C83B0Eu, 0xA20BC7C6u, 0x6D5451FDu});
 
-    if (!coefficients || !philox) {
+    const float adjacent = std::nextafter(128.0f, 129.0f);
+    const bool centroids =
+        ckpt::centroid_matches(5.088176635581476e-7f, 5.088177204015665e-7f, 492) &&
+        ckpt::centroid_matches(9.763647312865942e-8f, 9.763652997207828e-8f, 492) &&
+        ckpt::centroid_matches(0.0f, 492.0f, 492) &&
+        ckpt::centroid_matches(adjacent, 128.0f, 492) &&
+        !ckpt::centroid_matches(std::nextafter(adjacent, 129.0f), 128.0f, 492) &&
+        !ckpt::centroid_matches(1.0e-5f, 0.0f, 492) &&
+        !ckpt::centroid_matches(-1.0f, 0.0f, 492) &&
+        !ckpt::centroid_matches(0.0f, 0.0f, 0) &&
+        !ckpt::centroid_matches(std::numeric_limits<float>::infinity(), 0.0f, 492);
+
+    if (!coefficients || !philox || !centroids) {
         std::fprintf(stderr, "common primitive golden-vector test failed\n");
         return 1;
     }
