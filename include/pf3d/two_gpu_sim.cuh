@@ -49,6 +49,7 @@ private:
     bool merge_flags(bool include_states = false);
     bool gather_state();
     bool capture_surfaces(SurfaceOutput3D&);
+    bool capture_relaxation(RelaxationOutput3D&);
     bool distributed_step();
 
     int peer_device_;

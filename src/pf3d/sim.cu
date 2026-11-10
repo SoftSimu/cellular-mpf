@@ -17,6 +17,7 @@
 #include "../../include/palmieri_initializer.hpp"
 #include "../../include/pf3d/aggregate_coverage.cuh"
 #include "../../include/relaxed_centres.hpp"
+#include "../../include/output_file.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -224,6 +225,20 @@ bool Sim3D::allocate(const SimParams3D& params,
                      std::optional<int> checkpoint_measure_shards) {
     params_ = params;
     options_ = options;
+    if (!options.relaxation_path.empty() || options.relaxation_interval != 0 ||
+        options.relaxation_dense_every != 0) {
+        if (options.relaxation_path.empty() || options.relaxation_interval <= 0 ||
+            options.bench_steps > 0 || !params.substrate_slab() ||
+            options.relaxation_dense_every < 0 ||
+            (options.relaxation_dense_every > 0 &&
+             options.relaxation_dense_every % options.relaxation_interval != 0)) {
+            std::fprintf(stderr, "[3d] relaxation output requires substrate geometry, a path, "
+                                 "positive cadence, no --bench, and a dense period "
+                                 "that is a multiple of the cadence\n");
+            return false;
+        }
+        options_.record_planar_motion = true;
+    }
     if (options.boundary_interval < 0 ||
         options.boundary_path.empty() != (options.boundary_interval == 0) ||
         (options.boundary_compress && options.boundary_path.empty()) ||
@@ -1329,6 +1344,26 @@ bool Sim3D::prepare_cell_properties() {
 }
 
 bool Sim3D::initialize_common() {
+    if (!options_.relaxation_path.empty()) {
+        std::error_code error;
+        if (std::filesystem::exists(options_.relaxation_path, error) || error) {
+            std::fprintf(stderr, "[relaxation3d] cannot create new output; use a distinct "
+                                 "path for every restart\n");
+            return false;
+        }
+        if (!pf::distinct_output_paths({options_.trajectory_path, options_.boundary_path,
+                                       options_.surface_path, options_.relaxation_path})) return false;
+        const auto path = std::filesystem::weakly_canonical(options_.relaxation_path);
+        if (!options_.checkpoint_dir.empty() &&
+            path.parent_path() == std::filesystem::weakly_canonical(options_.checkpoint_dir)) {
+            const auto name = path.filename().string();
+            if (name == "checkpoint.pf3d" ||
+                (name.rfind("checkpoint_", 0) == 0 && path.extension() == ".pf3d")) {
+                std::fprintf(stderr, "[3d] relaxation output must not use a checkpoint filename\n");
+                return false;
+            }
+        }
+    }
     const std::uint64_t target = static_cast<std::uint64_t>(
         params_.total_steps());
     trajectory_every_ = options_.trajectory_interval > 0
@@ -1398,12 +1433,39 @@ bool Sim3D::initialize_common() {
                 static_cast<std::uint64_t>(options_.surface_interval),
                 options_.surface_compress) || !append_surface()) return false;
     }
+    if (!options_.relaxation_path.empty()) {
+        std::string metadata = trajectory_header(params_, B_, options_.promoted_measure_shards,
+            options_.promoted_measure_auto_wave_ctas, measurement_shards_, trajectory_every_);
+        if (metadata.empty()) return false;
+        char token[64];
+        std::snprintf(token, sizeof(token), " mobility_hash=%016llx",
+                      static_cast<unsigned long long>(mobility_hash_));
+        metadata += token;
+        metadata += " centroid_coordinates=trajectory relaxation_dense_every=" +
+            std::to_string(options_.relaxation_dense_every);
+        relaxation_output_ = std::make_unique<RelaxationOutput3D>();
+        if (!relaxation_output_->open(options_.relaxation_path, params_, steps_done_,
+                static_cast<std::uint64_t>(options_.relaxation_interval), metadata) ||
+            !append_relaxation()) return false;
+    }
     return true;
 }
 
 SurfaceDeviceView3D Sim3D::surface_view() const {
     return {options_.device, current_phi(), d_promoted_phi_[current_promoted_phi_index_],
             d_cells_, B_, field_storage_, selection_, stream_};
+}
+
+RelaxationDeviceView3D Sim3D::relaxation_view() const {
+    return {surface_view(), d_S_[current_S_index_], layout_};
+}
+
+bool Sim3D::append_relaxation() {
+    if (!relaxation_output_) return true;
+    const bool ok = capture_relaxation_ ? capture_relaxation_(*relaxation_output_)
+        : relaxation_output_->capture({relaxation_view()}, steps_done_);
+    if (ok) last_relaxation_step_ = steps_done_;
+    return ok;
 }
 
 bool Sim3D::append_surface() {
@@ -2390,6 +2452,15 @@ bool Sim3D::run() {
     const std::uint64_t surface_every = surface_output_
         ? static_cast<std::uint64_t>(options_.surface_interval) : 0;
     std::uint64_t next_surface = schedule_grid_after(steps_done_, surface_every);
+    const std::uint64_t relaxation_every = relaxation_output_
+        ? static_cast<std::uint64_t>(options_.relaxation_interval) : 0;
+    const auto relaxation_dense_every = static_cast<std::uint64_t>(options_.relaxation_dense_every);
+    const auto next_relaxation_sample = [&] {
+        if (relaxation_dense_every && steps_done_ % relaxation_dense_every < relaxation_every)
+            return schedule_after(steps_done_, 1);
+        return schedule_grid_after(steps_done_, relaxation_every);
+    };
+    std::uint64_t next_relaxation = next_relaxation_sample();
     int since_poll = 0;
 
     while (steps_done_ < target && !terminate_requested) {
@@ -2403,6 +2474,7 @@ bool Sim3D::run() {
                            steps_done_ >= next_compaction ||
                            steps_done_ >= next_boundary ||
                            steps_done_ >= next_surface ||
+                           steps_done_ >= next_relaxation ||
                            steps_done_ >= target ||
                            since_poll >= kHostPollEvery;
         if (!event) continue;
@@ -2437,6 +2509,10 @@ bool Sim3D::run() {
             std::fflush(stdout);
             advance_schedule(&next_print,
                 static_cast<std::uint64_t>(options_.print_interval));
+        }
+        if (relaxation_output_ && steps_done_ >= next_relaxation) {
+            if (!append_relaxation()) return false;
+            next_relaxation = next_relaxation_sample();
         }
         if (trajectory_file_ && steps_done_ >= next_trajectory) {
             if (!append_trajectory()) return false;
@@ -2487,6 +2563,10 @@ bool Sim3D::run() {
     if (surface_output_) {
         if (last_surface_step_ != steps_done_ && !append_surface()) return false;
         if (!surface_output_->close()) return false;
+    }
+    if (relaxation_output_) {
+        if (last_relaxation_step_ != steps_done_ && !append_relaxation()) return false;
+        if (!relaxation_output_->close()) return false;
     }
     if (terminate_requested)
         std::printf("[3d] termination requested; stopped at accepted step %llu\n",

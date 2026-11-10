@@ -97,11 +97,13 @@ lattice spacings and time is in model units.
 | 2D cell boundaries | `--boundary-out` | Field samples for reconstructing contours |
 | Projected 3D boundaries | `--boundary-out` | Per-cell silhouettes or substrate footprints |
 | 3D cell surfaces | `--surface-out` | Field samples for reconstructing each cell's `phi=0.5` surface |
+| Substrate relaxation | `--relaxation-out` | Independent spatial contributions to volume-centroid motion |
 
 Recorders are optional. See the [2D velocity](docs/velocity-output.md),
 [2D boundary](docs/boundary-output.md), [projected 3D boundary](docs/boundary-output-3d.md)
 and [3D surface](docs/surface_output_3d.md) guides for formats and sampling
 options. Use a new surface-output filename for each restart segment.
+For substrate transport decomposition, see the [spatial relaxation guide](docs/relaxation-output-3d.md).
 
 To continue a 2D simulation, pass `-c path/to/checkpoint.bin` and a later
 `--t-end`. The 3D checkpoint is named `checkpoint.pf3d`. Checkpoints retain

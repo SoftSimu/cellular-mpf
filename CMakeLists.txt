@@ -136,7 +136,8 @@ if(PF_BUILD_3D)
   if(NOT PF_HOST_NO_CONTRACTION OR NOT PF_CUDA_HOST_NO_CONTRACTION)
     message(FATAL_ERROR "No verified host no-contraction flags for this compiler pair")
   endif()
-  add_library(pf3d_boundary STATIC src/pf3d/boundary_output.cu src/pf3d/surface_output.cu)
+  add_library(pf3d_boundary STATIC src/pf3d/boundary_output.cu src/pf3d/surface_output.cu
+    src/pf3d/relaxation_output.cu src/output_file.cpp)
   target_include_directories(pf3d_boundary PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/common)
   pf_cuda_target(pf3d_boundary)
@@ -195,6 +196,10 @@ if(BUILD_TESTING)
   add_test(NAME common_primitives_cpu COMMAND common_primitives_cpu_test)
   add_test(NAME pf2d_checkpoint_centroid COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/checkpoint_centroid_test.py)
+  if(PF_BUILD_3D)
+    add_test(NAME pf3d_relaxation_output COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/3d/relaxation_output_test.py)
+  endif()
 
   if(PF_HOST_NO_CONTRACTION)
     add_executable(pf2d_mobility_model_test tests/mobility_model_cpu_test.cpp)
@@ -270,7 +275,7 @@ endforeach()
 install(PROGRAMS
   tools/relaxed_2d_to_slab_centres.py tools/stack_channel_centres.py
   tools/render_pf3d_slab.py tools/velocity_moments.py tools/pf3d_boundary.py
-  tools/pf3d_analyze_contacts.py tools/pf3d_export_surfaces.py DESTINATION bin)
+  tools/pf3d_analyze_contacts.py tools/pf3d_export_surfaces.py tools/pf3d_relaxation.py DESTINATION bin)
 install(FILES
   tools/pf3d_checkpoint_header.py tools/pf3d_surface.py tools/pf3d_contact.py
   tools/pf3d_exchange.py tools/pf3d_event_catalog.py DESTINATION bin)

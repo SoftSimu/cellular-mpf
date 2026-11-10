@@ -58,6 +58,7 @@ TwoGpuSim3D::~TwoGpuSim3D() {
         sim_[r]->distributed_step_ = {};
         sim_[r]->gather_state_ = {};
         sim_[r]->capture_surfaces_ = {};
+        sim_[r]->capture_relaxation_ = {};
         if (!select(r)) continue;
         checked(cudaStreamSynchronize(sim_[r]->stream_), "drain owned work");
         if (exchange_streams_[r])
@@ -195,6 +196,9 @@ bool TwoGpuSim3D::clone_peer() {
     options.surface_path.clear();
     options.surface_interval = 0;
     options.surface_compress = false;
+    options.relaxation_path.clear();
+    options.relaxation_interval = 0;
+    options.relaxation_dense_every = 0;
     options.checkpoint_dir.clear();
     options.final_checkpoint = false;
     options.measure_shards = primary.measurement_shards_;
@@ -348,6 +352,9 @@ bool TwoGpuSim3D::initialize() {
     primary.gather_state_ = [this] { return gather_state(); };
     primary.capture_surfaces_ = [this](SurfaceOutput3D& output) {
         return capture_surfaces(output);
+    };
+    primary.capture_relaxation_ = [this](RelaxationOutput3D& output) {
+        return capture_relaxation(output);
     };
     std::printf("[two-gpu] devices %d,%d; y-partitioned whole cells; "
                 "replicated storage; base measurement shards %d\n",
@@ -673,6 +680,15 @@ bool TwoGpuSim3D::capture_surfaces(SurfaceOutput3D& output) {
 }
 
 bool TwoGpuSim3D::run() { return select(0) && sim_[0]->run(); }
+
+bool TwoGpuSim3D::capture_relaxation(RelaxationOutput3D& output) {
+    // Drain ownership migrations before observing the owner's field and S.
+    if (!wait_all()) return false;
+    if (primary_canonical_)
+        return output.capture({sim_[0]->relaxation_view()}, sim_[0]->step());
+    return output.capture({sim_[0]->relaxation_view(), sim_[1]->relaxation_view()},
+                          sim_[0]->step());
+}
 
 bool TwoGpuSim3D::bench(int steps, double* milliseconds_per_step) {
     // GPU0 events include its idle waits for peer/host coordination. The shared

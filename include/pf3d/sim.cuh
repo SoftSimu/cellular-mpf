@@ -12,6 +12,7 @@
 #include "checkpoint.cuh"
 #include "boundary_output.cuh"
 #include "surface_output.cuh"
+#include "relaxation_output.cuh"
 #include "initializer.hpp"
 #include "kernels.cuh"
 #include "palmieri_initializer.hpp"
@@ -93,6 +94,9 @@ struct RunOptions3D {
     std::string surface_path;
     long long surface_interval = 0;
     bool surface_compress = false;
+    std::string relaxation_path;
+    long long relaxation_interval = 0;
+    long long relaxation_dense_every = 0;
 };
 
 class Sim3D {
@@ -164,6 +168,8 @@ private:
     bool append_boundary();
     bool append_surface();
     SurfaceDeviceView3D surface_view() const;
+    bool append_relaxation();
+    RelaxationDeviceView3D relaxation_view() const;
     const float* current_phi() const;
     float* current_phi();
     std::uint32_t* current_S();
@@ -175,6 +181,8 @@ private:
     std::uint64_t last_boundary_step_ = 0;
     std::unique_ptr<SurfaceOutput3D> surface_output_;
     std::uint64_t last_surface_step_ = 0;
+    std::unique_ptr<RelaxationOutput3D> relaxation_output_;
+    std::uint64_t last_relaxation_step_ = 0;
     StorageMode3D selected_mode_ = StorageMode3D::Auto;
     SLayout3D layout_{};
     CellFieldStorage3D field_storage_{};
@@ -221,6 +229,7 @@ private:
     std::function<bool()> distributed_step_;
     std::function<bool()> gather_state_;
     std::function<bool(SurfaceOutput3D&)> capture_surfaces_;
+    std::function<bool(RelaxationOutput3D&)> capture_relaxation_;
 
     float* d_phi_[2] = {nullptr, nullptr};
     float** d_promoted_phi_[2] = {nullptr, nullptr};

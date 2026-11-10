@@ -133,6 +133,14 @@ void usage(const char* program) {
         "  --surface-compression <none|zstd> optional zstd build      (none)\n"
         "                            new segment file on every restart\n"
         "\n"
+        "spatial relaxation output (substrate slab only, off by default)\n"
+        "  --relaxation-out <path>   new binary segment of independent centroid rates\n"
+        "  --relaxation-interval <n> cadence in accepted steps; required\n"
+        "                            also enables --record-planar-motion\n"
+        "  --relaxation-dense-every <n> every-step checks during the first\n"
+        "                            interval of each n-step period; n must be\n"
+        "                            a multiple of the interval (off)\n"
+        "\n"
         "checkpointing (current PF3D format)\n"
         "  -c, --checkpoint <path>   resume the complete stored state\n"
         "  --checkpoint-interval <n> rolling checkpoint cadence in steps\n"
@@ -275,6 +283,7 @@ struct ParsedCommand {
     bool trajectory_interval_supplied = false;
     bool boundary_options_supplied = false;
     bool surface_options_supplied = false;
+    bool relaxation_options_supplied = false;
     bool slab_height_supplied = false;
     int slab_height = 0;
     bool channel_height_supplied = false;
@@ -751,6 +760,25 @@ OptionStatus parse_checkpoint_option(int argc, char** argv, int* index,
     return OptionStatus::Unrecognized;
 }
 
+OptionStatus parse_relaxation_option(int argc, char** argv, int* index,
+                                     const char* argument, ParsedCommand* command) {
+    if (std::strcmp(argument, "--relaxation-out") != 0 &&
+        std::strcmp(argument, "--relaxation-interval") != 0 &&
+        std::strcmp(argument, "--relaxation-dense-every") != 0)
+        return OptionStatus::Unrecognized;
+    command->relaxation_options_supplied = true;
+    const char* value = value_after(argc, argv, index, argument);
+    if (!value || !value[0]) return OptionStatus::Error;
+    if (std::strcmp(argument, "--relaxation-out") == 0)
+        command->options.relaxation_path = value;
+    else if (std::strcmp(argument, "--relaxation-dense-every") == 0) {
+        if (!parse_integer(argument, value, 1, 1000000000000LL,
+                           &command->options.relaxation_dense_every)) return OptionStatus::Error;
+    } else if (!parse_integer(argument, value, 1, 1000000000000LL,
+                           &command->options.relaxation_interval)) return OptionStatus::Error;
+    return OptionStatus::Accepted;
+}
+
 CommandStatus parse_command_line(int argc, char** argv,
                                  ParsedCommand* command) {
     using OptionParser = OptionStatus (*)(int, char**, int*, const char*,
@@ -762,6 +790,7 @@ CommandStatus parse_command_line(int argc, char** argv,
         parse_trajectory_option,
         parse_boundary_option,
         parse_surface_option,
+        parse_relaxation_option,
         parse_checkpoint_option,
     };
 
@@ -806,6 +835,13 @@ CommandStatus parse_command_line(int argc, char** argv,
     }
     if (command->surface_options_supplied && command->options.bench_steps > 0) {
         std::fprintf(stderr, "[3d] surface output cannot be combined with --bench\n");
+        return CommandStatus::UsageError;
+    }
+    if (command->relaxation_options_supplied &&
+        (command->options.relaxation_path.empty() || command->options.relaxation_interval <= 0 ||
+         command->options.bench_steps > 0)) {
+        std::fprintf(stderr, "[3d] relaxation output requires --relaxation-out and "
+                             "--relaxation-interval, without --bench\n");
         return CommandStatus::UsageError;
     }
     return CommandStatus::Ready;
