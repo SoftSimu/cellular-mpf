@@ -134,9 +134,10 @@ alongside its all-normal reference.
 
 ## Tests and documentation
 
-Enable the small CPU references and GPU smoke tests explicitly:
+Enable the small CPU references and GPU smoke tests explicitly. The 3D reader tests require NumPy:
 
 ```sh
+python3 -m pip install numpy
 cmake -S . -B build -DBUILD_TESTING=ON -DPF_ENABLE_GPU_TESTS=ON
 cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure

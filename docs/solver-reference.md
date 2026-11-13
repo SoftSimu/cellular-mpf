@@ -46,11 +46,12 @@ it does not use MPI or domain-decomposed cell fields.
 - The 3D bulk-copy loader requires NVIDIA nvcc 12.5+ and explicit architecture targets
   of 90 or newer. H100/GH200 are tested; newer architectures are not certified.
 - Python 3.10+ for examples, readers and the small CPU-test configuration.
+- NumPy for the 3D output readers and their CPU tests.
 - Python 3.11+ and the pinned analysis dependencies for contour/contact tests
   or full-field visualization.
 
 The current 3D bulk-copy path has been exercised on GH200 with NVHPC 26.3/CUDA
-13.1. A clean Windows build with MSVC 19.44/CUDA 12.5.82 passed all ten retained
+13.1. A clean Windows build with MSVC 19.44/CUDA 12.5.82 passed all fourteen retained
 CPU and postprocessing tests; this does not establish GPU performance.
 Earlier single-GPU checks on H100 with GCC 12.3/CUDA 13.2 predate the bulk-copy
 path. Two-device execution requires matching GPUs with CUDA peer access;
@@ -193,9 +194,11 @@ graph change is a candidate event, not proof of an elementary 3D T transition.
 ## Tests
 
 Tests are opt-in. The retained CPU references check common coefficient/Philox
-primitives, 2D mobility and independent dense 3D one-step calculations:
+primitives, mobility, independent dense 3D one-step calculations, and checkpoint
+and measurement formats:
 
 ```sh
+python3 -m pip install numpy
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure
