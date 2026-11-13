@@ -252,7 +252,7 @@ __device__ __forceinline__ void stencil27(const float* shared_phi,
                     - shared_phi[halo_index<RowStride>(hx, hy, hz - 1)]);
 }
 
-template <int RowStride = kHaloRowStride>
+template <int RowStride = kHaloRowStride, bool Normalized = true>
 __device__ __forceinline__ void load_stencil_plane(
     const float* shared_phi, int ix, int iy, int hz, float* plane) {
     // Reuse the face/edge plane sums in adjacent stencil evaluations.
@@ -268,48 +268,91 @@ __device__ __forceinline__ void load_stencil_plane(
     plane[0] = values[4];
     plane[1] = corners + 3.0f * edges + 14.0f * values[4];
     plane[2] = 3.0f * corners + 14.0f * edges - 128.0f * values[4];
-    plane[3] = 0.5f * (values[5] - values[3]);
-    plane[4] = 0.5f * (values[7] - values[1]);
+    constexpr float gradient_scale = Normalized ? 0.5f : 1.0f;
+    plane[3] = gradient_scale * (values[5] - values[3]);
+    plane[4] = gradient_scale * (values[7] - values[1]);
 }
 
 struct StencilValues3D {
     float centre, lap, gx, gy, gz;
 };
 
+// Adjacent y rows share six of their nine XY samples. Their raw differences
+// pair with velocities scaled by 1/2 in the fast update.
+template <int RowStride>
+__device__ __forceinline__ void load_stencil_pair(
+    const float* shared_phi, int ix, int iy, int hz, float* plane) {
+    // Each row stores centre, off-plane sum, in-plane sum, dx and dy.
+    float values[12];
+#pragma unroll
+    for (int y = 0; y < 4; ++y)
+#pragma unroll
+        for (int x = 0; x < 3; ++x)
+            values[3 * y + x] = shared_phi[halo_index<RowStride>(ix + x, iy + y, hz)];
+#pragma unroll
+    for (int row = 0; row < 2; ++row) {
+        const float* v = values + 3 * row;
+        float* p = plane + 5 * row;
+        const float corners = (v[0] + v[2]) + (v[6] + v[8]);
+        const float edges = (v[1] + v[3]) + (v[5] + v[7]);
+        p[0] = v[4];
+        p[1] = corners + 3.0f * edges + 14.0f * v[4];
+        p[2] = 3.0f * corners + 14.0f * edges - 128.0f * v[4];
+        p[3] = v[5] - v[3];
+        p[4] = v[7] - v[1];
+    }
+}
+
+template <int RowStride>
+__device__ __forceinline__ void advance_stencil_pair(
+    const float* shared_phi, int ix, int iy, int iz,
+    float* below, const float* middle, StencilValues3D* result) {
+    const float lower_centre0 = below[0], lower_weighted0 = below[1];
+    const float lower_centre1 = below[5], lower_weighted1 = below[6];
+    load_stencil_pair<RowStride>(shared_phi, ix, iy, iz + 2, below);
+    result[0] = {middle[0], (lower_weighted0 + middle[2] + below[1]) *
+                          static_cast<float>(1.0 / kLapDenom),
+                 middle[3], middle[4], below[0] - lower_centre0};
+    result[1] = {middle[5], (lower_weighted1 + middle[7] + below[6]) *
+                          static_cast<float>(1.0 / kLapDenom),
+                 middle[8], middle[9], below[5] - lower_centre1};
+}
+
 // Consume z-1 before replacing it with z+1; retain only two planes of
 // reusable sums rather than reloading the full 27-point neighborhood.
-template <int RowStride = kHaloRowStride>
+template <int RowStride = kHaloRowStride, bool Normalized = true>
 __device__ __forceinline__ StencilValues3D advance_stencil_plane(
     const float* shared_phi, int ix, int iy, int iz,
     float* below, const float* middle) {
     static_assert(kLapCentreW == -128 && kLapFaceW == 14 &&
                   kLapEdgeW == 3 && kLapCornerW == 1);
     const float lower_centre = below[0], lower_weighted = below[1];
-    load_stencil_plane<RowStride>(shared_phi, ix, iy, iz + 2, below);
+    load_stencil_plane<RowStride, Normalized>(shared_phi, ix, iy, iz + 2, below);
     StencilValues3D result{};
     result.centre = middle[0];
     result.lap = (lower_weighted + middle[2] + below[1])
                * static_cast<float>(1.0 / kLapDenom);
     result.gx = middle[3];
     result.gy = middle[4];
-    result.gz = 0.5f * (below[0] - lower_centre);
+    constexpr float gradient_scale = Normalized ? 0.5f : 1.0f;
+    result.gz = gradient_scale * (below[0] - lower_centre);
     return result;
 }
 
-// The measurement and surface passes use only the centred gradients, so the
-// Laplacian accumulation of stencil27 is dead work there.  These expressions
-// are verbatim the gradient tail of stencil27.
-template <int RowStride = kHaloRowStride>
+// Force and surface measurements need only centred gradients. The force-only
+// reduction can apply the factor 1/2 once per shard instead of once per voxel.
+template <int RowStride = kHaloRowStride, bool Normalized = true>
 __device__ __forceinline__ void gradient3(const float* shared_phi,
                                            int hx, int hy, int hz,
                                            float* grad_x,
                                            float* grad_y,
                                            float* grad_z) {
-    *grad_x = 0.5f * (shared_phi[halo_index<RowStride>(hx + 1, hy, hz)]
+    constexpr float scale = Normalized ? 0.5f : 1.0f;
+    *grad_x = scale * (shared_phi[halo_index<RowStride>(hx + 1, hy, hz)]
                     - shared_phi[halo_index<RowStride>(hx - 1, hy, hz)]);
-    *grad_y = 0.5f * (shared_phi[halo_index<RowStride>(hx, hy + 1, hz)]
+    *grad_y = scale * (shared_phi[halo_index<RowStride>(hx, hy + 1, hz)]
                     - shared_phi[halo_index<RowStride>(hx, hy - 1, hz)]);
-    *grad_z = 0.5f * (shared_phi[halo_index<RowStride>(hx, hy, hz + 1)]
+    *grad_z = scale * (shared_phi[halo_index<RowStride>(hx, hy, hz + 1)]
                     - shared_phi[halo_index<RowStride>(hx, hy, hz - 1)]);
 }
 
@@ -968,9 +1011,10 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
         const float ratio = state->M_pf == 0.0f ? 1.0f : state->M_pf / args.uniform_mobility;
         const float gamma = ratio == 1.0f ? state->gamma * args.mobility_scale
                                          : (state->gamma * args.mobility_scale) * ratio;
-        const float velocity_x = state->velocity_x;
-        const float velocity_y = state->velocity_y;
-        const float velocity_z = state->velocity_z;
+        constexpr float gradient_scale = CollectMoments ? 1.0f : 0.5f;
+        const float velocity_x = state->velocity_x * gradient_scale;
+        const float velocity_y = state->velocity_y * gradient_scale;
+        const float velocity_z = state->velocity_z * gradient_scale;
         const float bulk = args.bulk_scale * gamma;
         const float inherited_volume = static_cast<float>(
             args.volume_scale * (args.V0 - state->V));
@@ -1088,6 +1132,8 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             const auto visit_tile = [&](auto interior_tag, auto measured_tag) {
                 constexpr bool Measured = decltype(measured_tag)::value;
                 constexpr bool Interior = decltype(interior_tag)::value;
+                const float tile_interaction = Measured && !WallCoupling
+                                                   ? interaction * kQInvF : interaction;
                 [[maybe_unused]] PendingScatter3D pending_scatter;
                 [[maybe_unused]] const std::size_t aggregate_plane_words =
                     static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
@@ -1151,15 +1197,16 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     const std::uint32_t aggregate =
                         !CollectMoments ? prefetched : args.S_in[aggregate_index];
                     float other;
-                    if constexpr (Measured)
-                        other = static_cast<float>(aggregate - q_of(centre)) * kQInvF;
-                    else
+                    if constexpr (Measured) {
+                        other = static_cast<float>(aggregate - q_of(centre));
+                        if constexpr (WallCoupling) other *= kQInvF;
+                    } else
                         other = other_field(aggregate, centre, state, args.global_flags);
                     if constexpr (WallCoupling)
                         other += weighted_wall_field<true>(args.wall, wz);
                     const float rhs = gamma * lap -
                                       bulk * centre * (1.0f - centre) * (1.0f - 2.0f * centre) +
-                                      volume * centre - interaction * centre * other -
+                                      volume * centre - tile_interaction * centre * other -
                                       (velocity_x * gx + velocity_y * gy + velocity_z * gz);
                     const float next = centre + args.dt * rhs;
                     if (!isfinite(next)) {
@@ -1231,6 +1278,48 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                         const int iz = q / (kBrickX * kBrickY);
                         update_voxel(ix, iy, iz, {});
                     }
+                } else if constexpr (Interior && InputsMeasured && !WallCoupling) {
+                    static_assert(kBrickX == 32 && kBrickY == 16 &&
+                                  2 * kThreads3D == kBrickX * kBrickY);
+                    const int ix = static_cast<int>(threadIdx.x) % kBrickX;
+                    const int iy = 2 * (static_cast<int>(threadIdx.x) / kBrickX);
+                    const int x = x0 + ix, y = y0 + iy;
+                    const int wy0 = wrap_offset(origin_y, y, args.layout.ny);
+                    const int wy1 = wrap_offset(origin_y, y + 1, args.layout.ny);
+                    const int wx = wrap_offset(origin_x, x, args.layout.nx);
+                    const int first_world_z = z_map.origin + z0;
+                    std::size_t cursor0 = s_index(args.layout, wx, wy0, first_world_z);
+                    std::size_t cursor1 = s_index(args.layout, wx, wy1, first_world_z);
+                    const std::size_t plane_words =
+                        static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
+                    std::size_t destination_cursor = field_index_at_world_z(
+                        x - shift_x, y - shift_y, z0 - shift_z, first_world_z, B, args.storage);
+                    std::uint32_t current0 = load_aggregate_ahead(args.S_in + cursor0);
+                    std::uint32_t current1 = load_aggregate_ahead(args.S_in + cursor1);
+                    std::uint32_t queued0 = load_aggregate_ahead(args.S_in + cursor0 + plane_words);
+                    std::uint32_t queued1 = load_aggregate_ahead(args.S_in + cursor1 + plane_words);
+                    float p0[10], p1[10];
+                    load_stencil_pair<row_stride>(shared_phi, ix, iy, 0, p0);
+                    load_stencil_pair<row_stride>(shared_phi, ix, iy, 1, p1);
+                    const auto advance_pair = [&](float* below, const float* middle, int iz) {
+                        const std::uint32_t next0 = iz + 2 < kBrickZ
+                            ? load_aggregate_ahead(args.S_in + cursor0 + 2 * plane_words) : 0u;
+                        const std::uint32_t next1 = iz + 2 < kBrickZ
+                            ? load_aggregate_ahead(args.S_in + cursor1 + 2 * plane_words) : 0u;
+                        StencilValues3D values[2];
+                        advance_stencil_pair<row_stride>(shared_phi, ix, iy, iz, below, middle, values);
+                        update_voxel(ix, iy, iz, values[0], current0, cursor0, destination_cursor);
+                        update_voxel(ix, iy + 1, iz, values[1], current1, cursor1, destination_cursor + B);
+                        cursor0 += plane_words;
+                        cursor1 += plane_words;
+                        destination_cursor += static_cast<std::size_t>(B) * B;
+                        current0 = queued0; current1 = queued1;
+                        queued0 = next0; queued1 = next1;
+                    };
+                    for (int iz = 0; iz < kBrickZ; iz += 2) {
+                        advance_pair(p0, p1, iz);
+                        if (iz + 1 < kBrickZ) advance_pair(p1, p0, iz + 1);
+                    }
                 } else {
                     // A warp retains its x-row while advancing through z. Each
                     // stencil reuses two XY planes and loads only the next plane.
@@ -1276,8 +1365,8 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                                        first_world_z, B, args.storage);
                         }
                         float p0[9], p1[9];
-                        load_stencil_plane<row_stride>(shared_phi, ix, iy, 0, p0);
-                        load_stencil_plane<row_stride>(shared_phi, ix, iy, 1, p1);
+                        load_stencil_plane<row_stride, false>(shared_phi, ix, iy, 0, p0);
+                        load_stencil_plane<row_stride, false>(shared_phi, ix, iy, 1, p1);
                         const auto advance = [&](float *below, const float *middle, int iz) {
                             constexpr int distance = 2;
                             std::uint32_t next_aggregate;
@@ -1290,7 +1379,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                             else
                                 next_aggregate =
                                     iz + distance < kBrickZ ? prefetch(iz + distance) : 0u;
-                            const auto values = advance_stencil_plane<row_stride>(
+                            const auto values = advance_stencil_plane<row_stride, false>(
                                 shared_phi, ix, iy, iz, below, middle);
                             if constexpr (Interior) {
                                 update_voxel(ix, iy, iz, values, current_aggregate,
@@ -2099,6 +2188,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                 };
                 double first_volume = 0.0, second_volume = 0.0;
                 unsigned first_max = 0, second_max = 0;
+                bool bad_aggregate = false;
                 static_assert(kBrickZ <= 32);
                 unsigned support_planes = 0;
                 const auto accumulate = [&](int iy, int y, bool valid, int iz, int wz,
@@ -2109,11 +2199,10 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     const int z = z0 + iz;
                     const float centre =
                         shared_phi[halo_index<kTmaRowStride>(ix + 1, iy + 1, iz + 1)];
-                    if (!isfinite(centre)) {
-                        raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
-                        return;
-                    }
-                    float other = other_field(prefetched, centre, state, args.global_flags);
+                    const auto own = q_of(centre);
+                    bad_aggregate |= prefetched < own;
+                    float other = static_cast<float>(prefetched - own);
+                    if constexpr (WallCoupling || ComputeSurface) other *= kQInvF;
                     if constexpr (WallCoupling)
                         other += weighted_wall_field<true>(args.wall, wz);
                     const double square = static_cast<double>(centre) * static_cast<double>(centre);
@@ -2128,7 +2217,8 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     // require the gradient at every voxel.
                     if (ComputeSurface || interaction != 0.0f) {
                         float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-                        gradient3<kTmaRowStride>(shared_phi, ix + 1, iy + 1, iz + 1, &gx, &gy, &gz);
+                        gradient3<kTmaRowStride, WallCoupling || ComputeSurface>(
+                            shared_phi, ix + 1, iy + 1, iz + 1, &gx, &gy, &gz);
                         if constexpr (ComputeSurface)
                             local.surface +=
                                 sqrt(static_cast<double>(gx) * gx + static_cast<double>(gy) * gy +
@@ -2176,6 +2266,10 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                 local.Cy += first_volume * static_cast<double>(y_first) +
                             second_volume * static_cast<double>(y_second);
                 const unsigned max_bits = max(first_max, second_max);
+                if (max_bits >= 0x7f800000u)
+                    raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
+                if (bad_aggregate)
+                    raise_flag(state, args.global_flags, FLAG3D_S_NEGATIVE);
                 local.phi_max_bits = max(local.phi_max_bits, max_bits);
                 if (__uint_as_float(max_bits) > kSupportEps) {
                     local.lo_x = min(local.lo_x, x);
@@ -2217,8 +2311,14 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
         parity = 1 - parity;
     }
 
-    const Reduction3D total = reduce_cta(local, warp_values, B);
+    Reduction3D total = reduce_cta(local, warp_values, B);
     if (threadIdx.x == 0) {
+        // Restore Q5.27 units and the central-difference factor once per shard.
+        if constexpr (!WallCoupling && !ComputeSurface) {
+            total.Ix *= 0x1p-28;
+            total.Iy *= 0x1p-28;
+            total.Iz *= 0x1p-28;
+        }
         args.partials[static_cast<std::size_t>(n) * args.shards + shard] = total;
     }
 }

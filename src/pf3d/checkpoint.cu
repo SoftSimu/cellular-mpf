@@ -789,7 +789,8 @@ bool read_validated_prefix(std::FILE* file, const std::string& path,
     if (!file || !header || !params || !metadata) return false;
     // Reject format, parameter, and layout inconsistencies before any
     // checkpoint payload is copied to device state.
-    std::memset(params, 0, sizeof(*params));
+    // Retain defaults for fields absent from the compact parameter record.
+    *params = ckpt3d::ParamsRecord3D{};
     if (!read_exact(file, header, sizeof(*header), "header") ||
         !header_valid(*header, path) ||
         !read_exact(file, params, header->params_bytes, "parameters") ||
