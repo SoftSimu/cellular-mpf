@@ -411,6 +411,23 @@ bool TwoGpuSim3D::configure_ownership(bool canonical_fields) {
                                              bricks.size(), sizeof(std::uint32_t));
         if (plans_[r].status != SeamPlanStatus::Ok) return fail("invalid seam plan");
     }
+    if (sim_[0]->layout_.bounded_z()) {
+        int planes = 0;
+        for (const auto& cell : canonical_) {
+            const auto top = cell.origin_z + cell_support_edge(cell, sim_[0]->B_);
+            planes = std::max(planes, static_cast<int>(
+                std::min<std::int64_t>(geometry_.nz, std::max<std::int64_t>(0, top))));
+        }
+        // Allocation changes can expand the dirty range. Until the fast path
+        // supplies its measured input bound, retain this conservative extent.
+        for (int r = 0; r < 2; ++r) {
+            auto& sim = *sim_[r];
+            if (!select(r)) return false;
+            if (sim.aggregate_clear_planes_ == 0 && sim.S_buffers_ == 2)
+                launch_clear_S(sim.d_S_[1 - sim.current_S_index_], sim.layout_, sim.stream_);
+            sim.aggregate_clear_planes_ = std::max(sim.aggregate_clear_planes_, planes);
+        }
+    }
     // Recentering changes exchange bounds, not the owner lists. Canonical
     // gathers still require reinstalling the selections they cleared.
     if (!canonical_fields && !migrated && !storage_changed && !owners_.empty()) {
@@ -662,9 +679,25 @@ bool TwoGpuSim3D::distributed_step() {
         // solver performs adaptive recovery; the next step replicates its result.
         return gather_state() && primary.synchronize_and_check("distributed recovery");
     }
+    int source_planes = 0;
+    if (!primary.options_.strict) {
+        // The fast update leaves the input support bounds in the cell record.
+        // They enclose every nonzero Q5.27 contribution, including diffuse tails.
+        // The old input S is now the buffer that the next step must clear.
+        static_assert(kSupportEps * kSupportEps * kQScaleF < 0.5f);
+        for (std::size_t id = 0; id < canonical_.size(); ++id) {
+            const auto& measured = downloads_[owners_[id]].cells[id];
+            const auto top = canonical_[id].origin_z + measured.bb_hi_z + 1;
+            source_planes = std::max(source_planes, static_cast<int>(
+                std::min<std::int64_t>(geometry_.nz, std::max<std::int64_t>(0, top))));
+        }
+    }
     for (std::size_t id = 0; id < canonical_.size(); ++id)
         canonical_[id] = downloads_[owners_[id]].cells[id];
-    return enqueue_state_broadcast() && configure_ownership(false) && select(0);
+    if (!enqueue_state_broadcast() || !configure_ownership(false)) return false;
+    if (source_planes > 0)
+        for (auto& sim : sim_) sim->aggregate_clear_planes_ = source_planes;
+    return select(0);
 }
 
 bool TwoGpuSim3D::capture_surfaces(SurfaceOutput3D& output) {

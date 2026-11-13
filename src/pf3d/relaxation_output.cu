@@ -17,7 +17,7 @@
 
 namespace pf3d {
 namespace {
-constexpr int kThreads = 256, kShards = 8, kSums = 14;
+constexpr int kThreads = 256, kShards = 32, kSums = 14;
 struct Partial { double q[kSums]; };
 
 bool fail(const char* message) {
@@ -36,16 +36,6 @@ struct DeviceScope {
     explicit DeviceScope(int current) : device(current) {}
     ~DeviceScope() { gpu_ok(cudaSetDevice(device), "restore device"); }
 };
-
-__device__ double sample(const float* phi, const CellState3D& state, int B,
-                         int x, int y, int z, const RelaxationDeviceView3D& view) {
-    if (static_cast<unsigned>(x) >= static_cast<unsigned>(B) ||
-        static_cast<unsigned>(y) >= static_cast<unsigned>(B)) return 0;
-    int source_z = 0;
-    const int sign = phase_fetch_local_z(view.layout, state.origin_z, z, B, &source_z);
-    return sign == 0 ? 0.0 : sign * static_cast<double>(
-        phi[view.fields.storage.index(x, y, source_z, B, state.origin_z)]);
-}
 
 __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa,
                          Partial* partials) {
@@ -73,6 +63,24 @@ __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa
         const float stored = phi[fields.storage.index(x, y, z, B, state.origin_z)];
         if (stored == 0.0f) continue;
         const double p = stored, square = p * p;
+        // All stencil samples share three physical planes. Resolve reflection
+        // and compact storage once per plane, retaining the original sum order.
+        std::size_t planes[3];
+        int signs[3];
+#pragma unroll
+        for (int dz = -1; dz <= 1; ++dz) {
+            int source_z = 0;
+            signs[dz + 1] = phase_fetch_local_z(view.layout, state.origin_z, z + dz, B, &source_z);
+            planes[dz + 1] = fields.storage.index(0, 0, source_z, B, state.origin_z);
+        }
+        const auto sample = [&](int dx, int dy, int dz) {
+            const int sx = x + dx, sy = y + dy;
+            if (static_cast<unsigned>(sx) >= static_cast<unsigned>(B) ||
+                static_cast<unsigned>(sy) >= static_cast<unsigned>(B) || !signs[dz + 1])
+                return 0.0;
+            return signs[dz + 1] * static_cast<double>(
+                phi[planes[dz + 1] + static_cast<std::size_t>(sy) * B + sx]);
+        };
         double lap = kLapCentreW * p;
 #pragma unroll
         for (int dz = -1; dz <= 1; ++dz)
@@ -82,7 +90,7 @@ __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa
                 for (int dx = -1; dx <= 1; ++dx) {
                     const int distance = (dx != 0) + (dy != 0) + (dz != 0);
                     if (distance) lap += (distance == 1 ? kLapFaceW : distance == 2 ? kLapEdgeW : kLapCornerW)
-                        * sample(phi, state, B, x + dx, y + dy, z + dz, view);
+                        * sample(dx, dy, dz);
                 }
         lap /= kLapDenom;
         const std::uint32_t total = view.aggregate[s_index(view.layout,
@@ -102,8 +110,8 @@ __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa
         local.q[5] += x * weighted_G; local.q[6] += y * weighted_G; local.q[7] += z * weighted_G;
         local.q[8] += weighted_K;
         local.q[9] += x * weighted_K; local.q[10] += y * weighted_K; local.q[11] += z * weighted_K;
-        local.q[12] += p * sample(phi, state, B, x + 1, y, z, view);
-        local.q[13] += p * sample(phi, state, B, x, y + 1, z, view);
+        local.q[12] += p * sample(1, 0, 0);
+        local.q[13] += p * sample(0, 1, 0);
     }
     __shared__ double sums[kSums][kThreads];
 #pragma unroll
@@ -200,8 +208,16 @@ struct RelaxationOutput3D::Impl {
         int original = 0;
         RELAX_CUDA(cudaGetDevice(&original));
         DeviceScope restore(original);
-        std::vector<relaxation::Row> all;
+        std::vector<relaxation::Row> all(params.num_cells);
         std::vector<int> devices;
+        struct Pending {
+            Workspace* workspace;
+            cudaStream_t stream;
+            int count;
+            std::size_t offset;
+        };
+        std::vector<Pending> pending;
+        std::size_t total = 0;
         for (const auto& view : views) {
             const auto& fields = view.fields;
             if (!fields.cells || !fields.base_phi || !fields.promoted_phi || !view.aggregate ||
@@ -231,15 +247,20 @@ struct RelaxationOutput3D::Impl {
             finalize<<<(selected + kThreads - 1) / kThreads, kThreads, 0, fields.stream>>>(
                 view, params.phase_field_mobility, selected, ws.partials, ws.rows);
             RELAX_CUDA(cudaGetLastError());
-            const std::size_t offset = all.size();
-            all.resize(offset + selected);
-            RELAX_CUDA(cudaMemcpyAsync(all.data() + offset, ws.rows, selected * sizeof(relaxation::Row),
-                                      cudaMemcpyDeviceToHost, fields.stream));
-            RELAX_CUDA(cudaStreamSynchronize(fields.stream));
+            pending.push_back({&ws, fields.stream, selected, total});
+            total += selected;
+        }
+        if (total != all.size())
+            return fail("owner views must cover all cells exactly once");
+        // Launch every owner's reduction before waiting for any host transfer.
+        for (const auto& item : pending) {
+            RELAX_CUDA(cudaSetDevice(item.workspace->device));
+            RELAX_CUDA(cudaMemcpyAsync(all.data() + item.offset, item.workspace->rows,
+                                      item.count * sizeof(relaxation::Row),
+                                      cudaMemcpyDeviceToHost, item.stream));
+            RELAX_CUDA(cudaStreamSynchronize(item.stream));
         }
         std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
-        if (all.size() != static_cast<std::size_t>(params.num_cells))
-            return fail("owner views must cover all cells exactly once");
         std::vector<std::int64_t> ids;
         for (const auto& row : all) {
             if ((!ids.empty() && row.id <= ids.back()) || row.id < 0 ||

@@ -2095,8 +2095,6 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                         raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
                         return;
                     }
-                    float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-                    gradient3<kTmaRowStride>(shared_phi, ix + 1, iy + 1, iz + 1, &gx, &gy, &gz);
                     float other = other_field(prefetched, centre, state, args.global_flags);
                     if constexpr (WallCoupling)
                         other += weighted_wall_field<true>(args.wall, wz);
@@ -2106,14 +2104,21 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     else
                         second_volume += square;
                     local.Cz += square * static_cast<double>(z);
-                    if constexpr (ComputeSurface)
-                        local.surface +=
-                            sqrt(static_cast<double>(gx) * gx + static_cast<double>(gy) * gy +
-                                 static_cast<double>(gz) * gz);
                     const float interaction = centre * other;
-                    local.Ix += static_cast<double>(interaction * gx);
-                    local.Iy += static_cast<double>(interaction * gy);
-                    local.Iz += static_cast<double>(interaction * gz);
+                    // No interaction force is contributed where the quantized
+                    // neighbouring field is exactly zero; surface samples still
+                    // require the gradient at every voxel.
+                    if (ComputeSurface || interaction != 0.0f) {
+                        float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+                        gradient3<kTmaRowStride>(shared_phi, ix + 1, iy + 1, iz + 1, &gx, &gy, &gz);
+                        if constexpr (ComputeSurface)
+                            local.surface +=
+                                sqrt(static_cast<double>(gx) * gx + static_cast<double>(gy) * gy +
+                                     static_cast<double>(gz) * gz);
+                        local.Ix += static_cast<double>(interaction * gx);
+                        local.Iy += static_cast<double>(interaction * gy);
+                        local.Iz += static_cast<double>(interaction * gz);
+                    }
                     if (iy == iy0)
                         first_max = max(first_max, __float_as_uint(fabsf(centre)));
                     else
@@ -3059,6 +3064,9 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 160>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Boundary, 160, false, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Interior, 160, false, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 176, false, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Boundary, 176, false, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Interior, 176, false, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 0, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 160, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<
@@ -3077,6 +3085,8 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<true, false, 160>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true, 160>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<true, true, 160>),
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, false, 176>),
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true, 176>),
     };
     for (const void* kernel : bulk_copy_kernels) {
         const auto error = cudaFuncSetAttribute(kernel,
@@ -3171,6 +3181,20 @@ void enqueue_base_fast_pass(const UpdateArgs3D& args, int count,
             }
         }
     }
+    if constexpr (!WallCoupling) {
+        if (args.B == 176 && args.inputs_measured) {
+            if (args.tile_pass == UpdateTilePass3D::Boundary)
+                k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Boundary, 176, false, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards_per_cell, tensor_map);
+            else if (args.tile_pass == UpdateTilePass3D::Interior)
+                k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Interior, 176, false, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards_per_cell, tensor_map);
+            else
+                k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 176, false, true>
+                    <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards_per_cell, tensor_map);
+            return;
+        }
+    }
     if (args.B == 160 && args.tile_pass == UpdateTilePass3D::All) {
         k_update_tiled_sharded_fast_impl<WallCoupling, UpdateTilePass3D::All, 160>
             <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(
@@ -3246,11 +3270,13 @@ void launch_initialize_spheres(const InitArgs3D& args, cudaStream_t stream) {
 }
 
 void launch_clear_S(std::uint32_t* S, const SLayout3D& layout,
-                    cudaStream_t stream) {
+                    cudaStream_t stream, int planes) {
     if (S == nullptr || layout.words() == 0) return;
+    const auto height = planes > 0 ? std::min(planes, layout.nz) : layout.nz;
+    const auto words = static_cast<std::size_t>(layout.pitch_x) * layout.ny * height;
     const int blocks = static_cast<int>(std::min<std::size_t>(
-        4096, (layout.words() + kThreads3D - 1) / kThreads3D));
-    k_clear_u32<<<std::max(1, blocks), kThreads3D, 0, stream>>>(S, layout.words());
+        4096, (words + kThreads3D - 1) / kThreads3D));
+    k_clear_u32<<<std::max(1, blocks), kThreads3D, 0, stream>>>(S, words);
 }
 
 void launch_scatter_current(const ScatterArgs3D& args, cudaStream_t stream) {
@@ -3293,6 +3319,14 @@ bool enqueue_base_measurement(const MeasureArgs3D& args, int count,
                               const CUtensorMap& tensor_map, cudaStream_t stream) {
     CUtensorMap aggregate_map{};
     if (!aggregate_tensor_map(args.S, args.layout, &aggregate_map)) return false;
+    if constexpr (!WallCoupling) {
+        if (args.B == 176) {
+            k_measure_cell_shards_impl<false, ComputeSurface, 176>
+                <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
+                    args, tensor_map, aggregate_map);
+            return true;
+        }
+    }
     // Specializing the common 160-voxel brick folds integer tile indexing.
     if (args.B == 160)
         k_measure_cell_shards_impl<WallCoupling, ComputeSurface, 160>

@@ -70,32 +70,36 @@ constexpr int resolve_base_measure_shards(int policy, int cells,
 enum class BaseMeasureResumeResult {
     Ok,
     InvalidCheckpoint,
+    InvalidRequest,
     Mismatch
 };
 
 // Resolve the checkpoint contract on the destination device. An omitted CLI
 // option restores an exact stored count; an explicit option must resolve to
-// the same count. Stored zero applies the standard policy.
+// the same count unless regrouping is explicitly allowed. Stored zero applies
+// the standard policy; regrouping never changes the loaded fields or RNG state.
 inline BaseMeasureResumeResult resolve_base_measure_resume(
     std::uint64_t stored, bool supplied, int policy, int cells,
-    int multiprocessors, int blocks_per_sm, int* resolved) {
+    int multiprocessors, int blocks_per_sm, int* resolved,
+    bool allow_regroup = false) {
     if (resolved == nullptr || !valid_stored_base_measure_shards(stored))
         return BaseMeasureResumeResult::InvalidCheckpoint;
     const int effective = stored != 0
         ? static_cast<int>(stored)
         : resolve_base_measure_shards(0, cells, multiprocessors,
                                       blocks_per_sm);
+    if ((allow_regroup && !supplied) ||
+        (supplied && !valid_base_measure_policy(policy)))
+        return BaseMeasureResumeResult::InvalidRequest;
     if (!supplied) {
         *resolved = effective;
         return BaseMeasureResumeResult::Ok;
     }
-    if (!valid_base_measure_policy(policy))
-        return BaseMeasureResumeResult::InvalidCheckpoint;
     const int requested = resolve_base_measure_shards(
         policy, cells, multiprocessors, blocks_per_sm);
-    if (requested != effective)
+    if (requested != effective && !allow_regroup)
         return BaseMeasureResumeResult::Mismatch;
-    *resolved = effective;
+    *resolved = requested;
     return BaseMeasureResumeResult::Ok;
 }
 

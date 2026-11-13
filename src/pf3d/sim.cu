@@ -252,6 +252,13 @@ bool Sim3D::allocate(const SimParams3D& params,
     }
     const bool measure_shards_requested =
         options.measure_shards_supplied || options.measure_shards != 0;
+    if (options.allow_measure_regroup &&
+        (!checkpoint_measure_shards.has_value() || !options.measure_shards_supplied)) {
+        std::fprintf(stderr,
+            "[3d] --allow-measure-regroup requires --checkpoint "
+            "and explicit --measure-shards\n");
+        return false;
+    }
     if (measure_shards_requested &&
         !valid_base_measure_policy(options.measure_shards)) {
         std::fprintf(stderr,
@@ -386,7 +393,8 @@ bool Sim3D::allocate(const SimParams3D& params,
             static_cast<std::uint64_t>(*checkpoint_measure_shards),
             measure_shards_requested, options.measure_shards,
             params.num_cells, property.multiProcessorCount,
-            measured_sharded_active, &resolved_measure);
+            measured_sharded_active, &resolved_measure,
+            options.allow_measure_regroup);
         if (resume == BaseMeasureResumeResult::Mismatch) {
             std::fprintf(stderr,
                 "[3d] --measure-shards %d resolves %d base measurement "
@@ -412,6 +420,11 @@ bool Sim3D::allocate(const SimParams3D& params,
             return false;
         }
         measurement_shards_ = resolved_measure;
+        if (options.allow_measure_regroup) {
+            std::printf("[3d] explicit base measurement regroup: stored %d -> %d "
+                        "CTAs/cell; fields and tumble state retained\n",
+                        *checkpoint_measure_shards, measurement_shards_);
+        }
     }
     fast_base_blocks_per_sm_ = fast_update_sharded;
     sm_count_ = property.multiProcessorCount;
@@ -1738,7 +1751,8 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     const int next_phi = phi_buffers_ == 2 ? 1 - current_phi_index_
                                            : current_phi_index_;
     const int next_promoted_phi = 1 - current_promoted_phi_index_;
-    if (S_buffers_ == 2) launch_clear_S(d_S_[next_S], layout_, stream_);
+    if (S_buffers_ == 2)
+        launch_clear_S(d_S_[next_S], layout_, stream_, aggregate_clear_planes_);
     if (!phase_mark(3)) return false;
 
     UpdateArgs3D update{};
@@ -1768,7 +1782,7 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     update.compute_surface = false;
     // refresh_measurements checked these immutable source arrays in this
     // stream. The update still checks newly computed values and its writes.
-    update.inputs_measured = phi_buffers_ == 2 && params_.resolved_wall_channel();
+    update.inputs_measured = phi_buffers_ == 2 && params_.bounded_z();
     // The proof covers one complete, unpartitioned base update. Split GPU
     // passes and strict/in-place paths retain ordinary checked additions.
     if (aggregate_coverage_ && !exchange_region && !selection_.ids &&

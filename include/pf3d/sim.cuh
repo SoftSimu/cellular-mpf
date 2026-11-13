@@ -65,6 +65,8 @@ struct RunOptions3D {
     int measure_shards = 0;
     // Distinguishes an omitted option from an explicit policy on resume.
     bool measure_shards_supplied = false;
+    // Resume-only opt-in to a new reduction count; preserves fields and RNG.
+    bool allow_measure_regroup = false;
     // Zero keeps the bitwise one-CTA promoted measurement.  A positive count
     // (or -1 for the occupancy-derived value) shards it with a deterministic
     // ascending finalize. Regrouping the reduction may change low-order
@@ -189,6 +191,8 @@ private:
     int B_ = 0;
     int phi_buffers_ = 0;
     int S_buffers_ = 0;
+    // Upper bound on dirty planes in the next aggregate buffer; zero clears all.
+    int aggregate_clear_planes_ = 0;
     int scratch_slots_ = 0;
     int current_phi_index_ = 0;
     int current_S_index_ = 0;

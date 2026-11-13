@@ -165,7 +165,13 @@ For 3D, use `-c checkpoints/checkpoint.pf3d`. The CRC-protected checkpoint
 retains each logical brick, field, origin, velocity, polarity, stable identity
 and resolved measurement grouping. Model parameters are restored from the
 checkpoint rather than replaced by fresh-run options. A conflicting grouping
-is rejected unless the documented promoted-regroup option is explicitly used.
+is rejected by default. To select a different base-cell reduction, use
+`--allow-measure-regroup --measure-shards <count>` on a new output segment.
+The analogous promoted-cell option is `--allow-promoted-measure-regroup`.
+These explicit changes retain all fields, identities and tumble state, but
+alter floating-point summation order. New checkpoints store the selected
+grouping; subsequent resumes restore it without either override. An existing
+trajectory with the old grouping cannot be appended to.
 The logical payload remains cubic even when bounded-z GPU allocations omit
 exterior planes; height-matched storage saves device memory, not checkpoint
 disk space.

@@ -441,7 +441,7 @@ __global__ void k_verify_S(const std::uint32_t* S, std::size_t words,
 bool valid_runtime_geometry(int B, const SLayout3D& layout);
 void launch_initialize_spheres(const InitArgs3D& args, cudaStream_t stream = 0);
 void launch_clear_S(std::uint32_t* S, const SLayout3D& layout,
-                    cudaStream_t stream = 0);
+                    cudaStream_t stream = 0, int planes = 0);
 void launch_scatter_current(const ScatterArgs3D& args,
                             cudaStream_t stream = 0);
 void launch_scatter_promoted(const ScatterArgs3D& args,

@@ -101,6 +101,9 @@ void usage(const char* program) {
         "                            checkpoints and trajectory headers, and\n"
         "                            resumes must match the stored grouping\n"
         "                            or omit the option                  (0)\n"
+        "  --allow-measure-regroup   resume-only opt-in to a new explicit\n"
+        "                            --measure-shards count; preserves fields\n"
+        "                            and tumble state, changes rounding\n"
         "  --promoted-measure-shards <int>  promoted-measurement CTAs per\n"
         "                            cell; 0 keeps the bitwise one-CTA fold,\n"
         "                            -1 selects the occupancy-derived count;\n"
@@ -581,6 +584,10 @@ OptionStatus parse_execution_option(int argc, char** argv, int* index,
         options.allow_promoted_measure_regroup = true;
         return OptionStatus::Accepted;
     }
+    if (std::strcmp(argument, "--allow-measure-regroup") == 0) {
+        options.allow_measure_regroup = true;
+        return OptionStatus::Accepted;
+    }
     if (std::strcmp(argument, "--measure-shards") == 0) {
         value = value_after(argc, argv, index, argument);
         if (!value || !parse_integer(argument, value,
@@ -1021,6 +1028,13 @@ CommandStatus resolve_resume_contract(ParsedCommand* command,
 
 CommandStatus prepare_run(ParsedCommand* command, PreparedRun* prepared) {
     prepared->resumed = !command->checkpoint_input.empty();
+    if (command->options.allow_measure_regroup &&
+        (!prepared->resumed || !command->options.measure_shards_supplied)) {
+        std::fprintf(stderr,
+            "[3d] --allow-measure-regroup requires --checkpoint "
+            "and explicit --measure-shards\n");
+        return CommandStatus::UsageError;
+    }
     if (command->options.allow_promoted_measure_regroup &&
         (!prepared->resumed ||
          !command->options.promoted_measure_shards_supplied)) {

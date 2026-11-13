@@ -9,6 +9,7 @@
 
 #include "pf3d/reference.hpp"
 #include "pf3d/palmieri_initializer.hpp"
+#include "pf3d/measure_shards.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -585,6 +586,30 @@ void test_uniform_column_reduction() {
            "neutral bottom uses an even ghost at its face");
 }
 
+void test_measurement_resume_contract() {
+    using namespace pf3d;
+    using Result = BaseMeasureResumeResult;
+    int count = 0;
+    expect(resolve_base_measure_resume(1, true, 64, 400, 132, 3, &count)
+               == Result::Mismatch,
+           "resume cannot silently change the measurement fold");
+    expect(resolve_base_measure_resume(1, true, 64, 400, 132, 3, &count, true)
+               == Result::Ok && count == 64,
+           "explicit regroup selects the requested checkpointed count");
+    expect(resolve_base_measure_resume(64, false, 0, 400, 1, 1, &count)
+               == Result::Ok && count == 64,
+           "resume restores grouping independently of device occupancy");
+    expect(resolve_base_measure_resume(1, false, 64, 400, 132, 3, &count, true)
+               == Result::InvalidRequest,
+           "regroup requires an explicit policy");
+    expect(resolve_base_measure_resume(1, true, 65, 400, 132, 3, &count, true)
+               == Result::InvalidRequest,
+           "regroup cannot bypass the policy range");
+    expect(resolve_base_measure_resume(65, true, 64, 400, 132, 3, &count, true)
+               == Result::InvalidCheckpoint,
+           "regroup cannot repair malformed checkpoint metadata");
+}
+
 }  // namespace
 
 int main() {
@@ -599,6 +624,7 @@ int main() {
     test_periodic_translation();
     test_channel_placement_below_diameter();
     test_uniform_column_reduction();
+    test_measurement_resume_contract();
     if (failures != 0) {
         std::fprintf(stderr, "%d 3-D one-step CPU-reference test(s) failed\n",
                      failures);
