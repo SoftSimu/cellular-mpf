@@ -1049,7 +1049,14 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                 }
             }
             float* const shared_phi = parity == 0 ? halo0 : halo1;
-            if (!halo_any_nonzero<row_stride>(shared_phi)) {
+            bool nonzero_halo = true;
+            // Dense bounded cells rarely have an empty halo. Retain the
+            // load barrier without scanning the shared tile a second time.
+            if constexpr (InputsMeasured && !WallCoupling)
+                __syncthreads();
+            else
+                nonzero_halo = halo_any_nonzero<row_stride>(shared_phi);
+            if (!nonzero_halo) {
                 if constexpr (CompleteOutput) {
                     if (*output_complete != 0) {
                         const int tz = tile / tiles_per_plane;
@@ -1159,7 +1166,7 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                         raise_flag(state, args.global_flags, FLAG3D_NONFINITE);
                         return;
                     }
-                    if constexpr (!Interior || !WallCoupling) {
+                    if constexpr (!Interior) {
                         if (args.layout.free_top() && wz == args.layout.nz - 1 &&
                             fabsf(next) > kSupportEps) {
                             raise_flag(state, args.global_flags, FLAG3D_SLAB_TOP_CONTACT);
@@ -1312,7 +1319,9 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                           z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi &&
                                           x0 >= shift_x && x0 - shift_x + kBrickX <= B &&
                                           y0 >= shift_y && y0 - shift_y + kBrickY <= B &&
-                                          z0 >= shift_z && z0 - shift_z + kBrickZ <= B;
+                                          z0 >= shift_z && z0 - shift_z + kBrickZ <= B &&
+                                          (!args.layout.free_top() ||
+                                           z_map.origin + z0 + kBrickZ < args.layout.nz);
                     if (interior)
                         visit_tile(std::true_type{}, measured_tag);
                     else
@@ -2031,15 +2040,22 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
             aggregate_phase ^= 1;
         }
         float* const shared_phi = parity == 0 ? halo0 : halo1;
-        if (halo_any_nonzero<kTmaRowStride>(shared_phi)) {
+        bool nonzero_halo = true;
+        // Match the dense-tile update policy; the fallback keeps zero skipping.
+        if constexpr (FixedEdge == 176)
+            __syncthreads();
+        else
+            nonzero_halo = halo_any_nonzero<kTmaRowStride>(shared_phi);
+        if (nonzero_halo) {
             const int bx = brick % bricks_x;
             const int by = (brick / bricks_x) % bricks_y;
             const int bz = brick / (bricks_x * bricks_y);
             const int x0 = bx * kBrickX;
             const int y0 = by * kBrickY;
             const int z0 = bz * kBrickZ;
-            const auto visit_tile = [&](auto interior_tag) {
+            const auto visit_tile = [&](auto interior_tag, auto aggregate_tag) {
                 constexpr bool Interior = decltype(interior_tag)::value;
+                constexpr bool AggregateBulk = decltype(aggregate_tag)::value;
                 constexpr int row_stride = kThreads3D / kBrickX;
                 static_assert(kBrickY == row_stride || kBrickY == 2 * row_stride);
                 constexpr bool second_row_present = kBrickY == 2 * row_stride;
@@ -2071,7 +2087,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                 };
                 const auto prefetch_row = [&](std::size_t row, bool valid, int wz,
                                               [[maybe_unused]] int iy, [[maybe_unused]] int iz) {
-                    if (aggregate_bulk)
+                    if constexpr (AggregateBulk)
                         return iz < kBrickZ
                                    ? shared_aggregate[(iz * kBrickY + iy) * kAggregateRowStride +
                                                       ix + (aggregate_x & 3)]
@@ -2083,6 +2099,8 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                 };
                 double first_volume = 0.0, second_volume = 0.0;
                 unsigned first_max = 0, second_max = 0;
+                static_assert(kBrickZ <= 32);
+                unsigned support_planes = 0;
                 const auto accumulate = [&](int iy, int y, bool valid, int iz, int wz,
                                             std::uint32_t prefetched) {
                     if constexpr (!Interior)
@@ -2124,12 +2142,11 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     else
                         second_max = max(second_max, __float_as_uint(fabsf(centre)));
                     if (fabsf(centre) > kSupportEps) {
-                        if constexpr (!Interior || !WallCoupling) {
+                        if constexpr (!Interior) {
                             if (args.layout.free_top() && wz == args.layout.nz - 1)
                                 raise_flag(state, args.global_flags, FLAG3D_SLAB_TOP_CONTACT);
                         }
-                        local.lo_z = min(local.lo_z, z);
-                        local.hi_z = max(local.hi_z, z);
+                        support_planes |= 1u << iz;
                     }
                 };
                 // q=threadIdx.x+k*256 visits the two rows of each z plane in this
@@ -2172,13 +2189,26 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     local.lo_y = min(local.lo_y, y_second);
                     local.hi_y = max(local.hi_y, y_second);
                 }
+                if (support_planes != 0) {
+                    local.lo_z = min(local.lo_z, z0 + __ffs(support_planes) - 1);
+                    local.hi_z = max(local.hi_z, z0 + 31 - __clz(support_planes));
+                }
             };
             const bool interior = bounded_z && x0 + kBrickX <= B && y0 + kBrickY <= B &&
-                                  z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi;
-            if (interior)
-                visit_tile(std::true_type{});
-            else
-                visit_tile(std::false_type{});
+                                  z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi &&
+                                  (!args.layout.free_top() ||
+                                   z_map.origin + z0 + kBrickZ < args.layout.nz);
+            if (aggregate_bulk) {
+                if (interior)
+                    visit_tile(std::true_type{}, std::true_type{});
+                else
+                    visit_tile(std::false_type{}, std::true_type{});
+            } else {
+                if (interior)
+                    visit_tile(std::true_type{}, std::false_type{});
+                else
+                    visit_tile(std::false_type{}, std::false_type{});
+            }
         }
         // A fallback tile may use generic zero stores. Publish them to the
         // async proxy before this buffer can receive a later bulk transfer.
