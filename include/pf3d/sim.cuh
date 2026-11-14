@@ -193,6 +193,8 @@ private:
     int S_buffers_ = 0;
     // Upper bound on dirty planes in the next aggregate buffer; zero clears all.
     int aggregate_clear_planes_ = 0;
+    // Borrowed from the coordinator; bounds the next buffer's nonzero aggregate.
+    const int* aggregate_clear_tile_tops_ = nullptr;
     // Each buffer retains its own last write envelope; an empty envelope clears all rows.
     TileExchangeRegion3D aggregate_dirty_rows_[2]{};
     TileExchangeRegion3D aggregate_write_rows_{};

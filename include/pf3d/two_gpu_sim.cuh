@@ -43,6 +43,7 @@ private:
     bool enqueue_state_broadcast();
     bool copy_field(int id, int source, int destination);
     bool configure_ownership(bool canonical_fields);
+    void measure_aggregate_clear_tiles();
     bool exchange_sum(bool pending);
     bool start_exchange(bool pending);
     bool finish_exchange(bool pending);
@@ -56,6 +57,9 @@ private:
     std::array<std::unique_ptr<Sim3D>, 2> sim_;
     std::array<int*, 2> d_ids_{};
     std::array<std::uint32_t*, 2> d_receive_{};
+    std::array<int*, 2> d_clear_tile_tops_{};
+    int* h_clear_tile_tops_ = nullptr;
+    std::size_t clear_tile_count_ = 0;
     std::array<cudaEvent_t, 2> exchange_ready_{};
     std::array<cudaEvent_t, 2> exchange_sent_{};
     std::array<cudaStream_t, 2> exchange_streams_{};

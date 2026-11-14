@@ -34,18 +34,21 @@ bool fail(const char* message) {
 __global__ void add_rows(std::uint32_t* sum, const std::uint32_t* received,
                          int pitch, int ny, int lo, int rows, int zlo, int planes,
                          std::uint32_t* flags) {
-    const std::size_t band_words = static_cast<std::size_t>(pitch) * rows;
+    const std::size_t band_words = static_cast<std::size_t>(pitch / 4) * rows;
     // Walk contiguous rows within each plane without per-word division/modulo.
     for (std::size_t z = blockIdx.y; z < static_cast<std::size_t>(planes); z += gridDim.y) {
         const std::size_t base = ((z + zlo) * ny + lo) * pitch;
+        auto* out = reinterpret_cast<uint4*>(sum + base);
+        const auto* in = reinterpret_cast<const uint4*>(received + base);
         for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
                              threadIdx.x; i < band_words;
              i += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
-            const std::size_t index = base + i;
-            const std::uint32_t a = sum[index], b = received[index];
-            if (b > 0xffffffffu - a)
-                atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
-            sum[index] = a + b;
+            const uint4 a = out[i], b = in[i];
+            if (b.x > 0xffffffffu - a.x) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
+            if (b.y > 0xffffffffu - a.y) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
+            if (b.z > 0xffffffffu - a.z) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
+            if (b.w > 0xffffffffu - a.w) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
+            out[i] = make_uint4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
         }
     }
 }
@@ -76,7 +79,10 @@ TwoGpuSim3D::~TwoGpuSim3D() {
             checked(cudaStreamDestroy(exchange_streams_[r]), "destroy exchange stream");
         cudaFree(d_ids_[r]);
         cudaFree(d_receive_[r]);
+        cudaFree(d_clear_tile_tops_[r]);
     }
+    if (h_clear_tile_tops_)
+        checked(cudaFreeHost(h_clear_tile_tops_), "release aggregate bounds");
     for (HostSnapshot* snapshot : {&downloads_[0], &downloads_[1], &upload_})
         if (snapshot->cells)
             checked(cudaFreeHost(snapshot->cells), "release pinned metadata");
@@ -327,9 +333,18 @@ bool TwoGpuSim3D::initialize() {
     if (!clone_peer()) return false;
     const std::size_t receive_bytes = primary.S_words_ * sizeof(std::uint32_t);
     const std::size_t id_bytes = canonical_.size() * sizeof(int);
+    if (!primary.options_.strict) {
+        clear_tile_count_ = static_cast<std::size_t>(
+            (geometry_.pitch_x + kAggregateClearTile - 1) / kAggregateClearTile) *
+            ((geometry_.ny + kAggregateClearTile - 1) / kAggregateClearTile);
+        if (!checked(cudaHostAlloc(reinterpret_cast<void**>(&h_clear_tile_tops_),
+                     clear_tile_count_ * sizeof(int), cudaHostAllocPortable),
+                     "allocate pinned aggregate bounds")) return false;
+    }
     for (int r = 0; r < 2; ++r) {
         auto& sim = *sim_[r];
-        const std::size_t reserved = receive_bytes + 2 * id_bytes;
+        const std::size_t reserved = receive_bytes + 2 * id_bytes +
+            clear_tile_count_ * sizeof(int);
         if (reserved > sim.adaptive_budget_remaining_)
             return fail("peer-exchange workspace exceeds the configured memory budget");
         if (!select(r) ||
@@ -345,6 +360,9 @@ bool TwoGpuSim3D::initialize() {
                      "create exchange stream")) return false;
         sim.adaptive_budget_remaining_ -= reserved;
         sim.required_device_bytes_ += reserved;
+        if (clear_tile_count_ && !checked(cudaMalloc(
+            reinterpret_cast<void**>(&d_clear_tile_tops_[r]), clear_tile_count_ * sizeof(int)),
+            "allocate aggregate bounds")) return false;
     }
     if (!select(0) || !checked(cudaMemcpy(flags_.data(), primary.d_flags_,
          sizeof(flags_), cudaMemcpyDeviceToHost), "read initial integrity flags")) return false;
@@ -650,6 +668,49 @@ bool TwoGpuSim3D::gather_state() {
     return true;
 }
 
+void TwoGpuSim3D::measure_aggregate_clear_tiles() {
+    std::fill_n(h_clear_tile_tops_, clear_tile_count_, 0);
+    constexpr int edge = kAggregateClearTile;
+    const int columns = (geometry_.pitch_x + edge - 1) / edge;
+    const auto wrap = [](std::int64_t origin, int lo, int hi, int period) {
+        WrappedRows result{};
+        if (hi < lo) return result;
+        if (hi - lo + 1 >= period) {
+            result.pieces[0] = {0, period};
+            result.count = 1;
+            return result;
+        }
+        const int start = static_cast<int>(
+            ((origin % period + lo) % period + period) % period);
+        const int end = start + hi - lo + 1;
+        result.pieces[0] = {start, std::min(period, end)};
+        result.count = 1;
+        if (end > period) {
+            result.pieces[1] = {0, end - period};
+            result.count = 2;
+        }
+        return result;
+    };
+    // These are input-field bounds. After the swap, that input aggregate is
+    // exactly the next buffer to clear; no bound on future cell growth is needed.
+    for (std::size_t id = 0; id < canonical_.size(); ++id) {
+        const auto& origin = canonical_[id];
+        const auto& measured = downloads_[owners_[id]].cells[id];
+        if (measured.bb_hi_z < measured.bb_lo_z) continue;
+        const int top = static_cast<int>(std::clamp<std::int64_t>(
+            origin.origin_z + measured.bb_hi_z + 1, 0, geometry_.nz));
+        const auto xs = wrap(origin.origin_x, measured.bb_lo_x, measured.bb_hi_x, geometry_.nx);
+        const auto ys = wrap(origin.origin_y, measured.bb_lo_y, measured.bb_hi_y, geometry_.ny);
+        for (int a = 0; a < xs.count; ++a)
+            for (int b = 0; b < ys.count; ++b)
+                for (int y = ys.pieces[b].lo / edge; y <= (ys.pieces[b].hi - 1) / edge; ++y)
+                    for (int x = xs.pieces[a].lo / edge; x <= (xs.pieces[a].hi - 1) / edge; ++x) {
+                        auto& height = h_clear_tile_tops_[y * columns + x];
+                        height = std::max(height, top);
+                    }
+    }
+}
+
 bool TwoGpuSim3D::distributed_step() {
     auto& primary = *sim_[0];
     if (primary_canonical_) {
@@ -712,6 +773,7 @@ bool TwoGpuSim3D::distributed_step() {
         // They enclose every nonzero Q5.27 contribution, including diffuse tails.
         // The old input S is now the buffer that the next step must clear.
         static_assert(kSupportEps * kSupportEps * kQScaleF < 0.5f);
+        measure_aggregate_clear_tiles();
         for (std::size_t id = 0; id < canonical_.size(); ++id) {
             const auto& measured = downloads_[owners_[id]].cells[id];
             const auto top = canonical_[id].origin_z + measured.bb_hi_z + 1;
@@ -724,6 +786,14 @@ bool TwoGpuSim3D::distributed_step() {
     if (!enqueue_state_broadcast() || !configure_ownership(false)) return false;
     if (source_planes > 0)
         for (auto& sim : sim_) sim->aggregate_clear_planes_ = source_planes;
+    if (clear_tile_count_) {
+        for (int r = 0; r < 2; ++r) {
+            if (!select(r) || !checked(cudaMemcpyAsync(d_clear_tile_tops_[r], h_clear_tile_tops_,
+                 clear_tile_count_ * sizeof(int), cudaMemcpyHostToDevice, sim_[r]->stream_),
+                 "upload aggregate bounds")) return false;
+            sim_[r]->aggregate_clear_tile_tops_ = d_clear_tile_tops_[r];
+        }
+    }
     return select(0);
 }
 

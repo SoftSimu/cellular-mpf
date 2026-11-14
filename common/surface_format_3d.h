@@ -12,12 +12,47 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+
+#if defined(__aarch64__) && defined(__linux__) && defined(__GNUC__) \
+    && !defined(__NVCOMPILER) && !defined(__clang__) \
+    && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#define PF_SURFACE_ARM_CRC32 1
+#endif
 
 namespace pf3d::surface {
+
+#ifdef PF_SURFACE_ARM_CRC32
+// ARM's intrinsic header conflicts with CUDA's __clz declarations.
+__attribute__((target("+crc")))
+inline std::uint32_t crc32_arm(std::uint32_t previous, const void* data, std::size_t size) {
+    auto crc = ~previous;
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    while (size >= 8) {
+        std::uint64_t word;
+        std::memcpy(&word, bytes, sizeof(word));
+        asm("crc32x %w0, %w0, %1" : "+r"(crc) : "r"(word));
+        bytes += 8;
+        size -= 8;
+    }
+    while (size--) {
+        const std::uint32_t byte = *bytes++;
+        asm("crc32b %w0, %w0, %w1" : "+r"(crc) : "r"(byte));
+    }
+    return ~crc;
+}
+#endif
 
 // CRC-32/ISO-HDLC, compatible with Python's zlib.crc32. Stored checksum words
 // are zero-extended to uint64_t; this is a corruption check, not authentication.
 inline std::uint32_t crc32_update(std::uint32_t previous, const void* data, std::size_t size) {
+#ifdef PF_SURFACE_ARM_CRC32
+    // Keep the portable path on hosts without the IEEE CRC instruction.
+    static const bool accelerated = (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+    if (accelerated) return crc32_arm(previous, data, size);
+#endif
     static const auto table = [] {
         std::array<std::array<std::uint32_t, 256>, 8> result{};
         for (unsigned i = 0; i < 256; ++i) {
@@ -50,6 +85,8 @@ inline std::uint32_t crc32_update(std::uint32_t previous, const void* data, std:
     for (std::size_t q = 0; q < size; ++q) crc = table[0][(crc ^ bytes[q]) & 255u] ^ (crc >> 8);
     return ~crc;
 }
+
+#undef PF_SURFACE_ARM_CRC32
 
 // Little-endian, lossless samples for the phi=0.5 interface, not a restart.
 // The zero shell is an output convention, not a new PDE boundary condition.

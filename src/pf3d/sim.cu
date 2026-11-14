@@ -1568,6 +1568,7 @@ bool Sim3D::upload_promoted_tables() {
 
 
 bool Sim3D::reconstruct_current_S() {
+    aggregate_clear_tile_tops_ = nullptr;
     // Checkpoint loads, ownership transfers and recovery can replace fields.
     const auto range_bytes = static_cast<std::size_t>(params_.num_cells) * sizeof(int2);
     for (auto* ranges : field_dirty_planes_)
@@ -1801,7 +1802,8 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     const int next_promoted_phi = 1 - current_promoted_phi_index_;
     if (S_buffers_ == 2) {
         launch_clear_S(d_S_[next_S], layout_, stream_, aggregate_clear_planes_,
-                       &aggregate_dirty_rows_[next_S]);
+                       &aggregate_dirty_rows_[next_S], aggregate_clear_tile_tops_);
+        aggregate_clear_tile_tops_ = nullptr;
         aggregate_dirty_rows_[next_S] = aggregate_write_rows_;
     }
     if (!phase_mark(3)) return false;

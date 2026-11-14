@@ -1527,6 +1527,33 @@ __global__ void k_clear_S_rows(std::uint32_t* data, SLayout3D layout,
     }
 }
 
+__global__ void k_clear_S_tiles(std::uint32_t* data, SLayout3D layout,
+                               TileExchangeRegion3D rows, const int* tops) {
+    constexpr int edge = kAggregateClearTile;
+    const int height = tops[blockIdx.y * gridDim.x + blockIdx.x];
+    const int first_x = blockIdx.x * edge;
+    const int first_y = blockIdx.y * edge;
+    bool intersects_rows = rows.y_count == 0;
+    for (int b = 0; b < rows.y_count; ++b)
+        intersects_rows = intersects_rows ||
+            (first_y < rows.y_hi[b] && first_y + edge > rows.y_lo[b]);
+    if (!intersects_rows) return;
+    for (int z = blockIdx.z; z < height; z += gridDim.z) {
+        for (int q = threadIdx.x; q < edge * edge / 4; q += blockDim.x) {
+            const int x = first_x + 4 * (q % (edge / 4));
+            const int y = first_y + q / (edge / 4);
+            bool written_row = rows.y_count == 0;
+            for (int b = 0; b < rows.y_count; ++b)
+                written_row = written_row || (y >= rows.y_lo[b] && y < rows.y_hi[b]);
+            if (x < layout.pitch_x && y < layout.ny && written_row) {
+                const auto index = (static_cast<std::size_t>(z) * layout.ny + y)
+                    * layout.pitch_x + x;
+                *reinterpret_cast<uint4*>(data + index) = make_uint4(0, 0, 0, 0);
+            }
+        }
+    }
+}
+
 __global__ void k_clear_selected_base_out(UpdateArgs3D args,
                                           int blocks_per_cell,
                                           bool complete_output) {
@@ -3494,8 +3521,15 @@ void launch_initialize_spheres(const InitArgs3D& args, cudaStream_t stream) {
 
 void launch_clear_S(std::uint32_t* S, const SLayout3D& layout,
                     cudaStream_t stream, int planes,
-                    const TileExchangeRegion3D* rows) {
+                    const TileExchangeRegion3D* rows, const int* tile_tops) {
     if (S == nullptr || layout.words() == 0) return;
+    if (tile_tops) {
+        const dim3 grid((layout.pitch_x + kAggregateClearTile - 1) / kAggregateClearTile,
+                        (layout.ny + kAggregateClearTile - 1) / kAggregateClearTile, 4);
+        k_clear_S_tiles<<<grid, kThreads3D, 0, stream>>>(
+            S, layout, rows ? *rows : TileExchangeRegion3D{}, tile_tops);
+        return;
+    }
     const auto height = planes > 0 ? std::min(planes, layout.nz) : layout.nz;
     if (rows && rows->y_count > 0 &&
         valid_tile_exchange_region(*rows, layout.ny, layout.nz)) {

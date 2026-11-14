@@ -27,6 +27,7 @@
 namespace pf3d {
 
 constexpr int kThreads3D = 256;
+constexpr int kAggregateClearTile = 64;
 constexpr int kBrickX = 32;
 constexpr int kBrickY = 16;
 constexpr int kBrickZ = 8;
@@ -443,9 +444,12 @@ __global__ void k_verify_S(const std::uint32_t* S, std::size_t words,
 // storage_edge; each CTA uses that cell's edge, not the maximum allocation.
 bool valid_runtime_geometry(int B, const SLayout3D& layout);
 void launch_initialize_spheres(const InitArgs3D& args, cudaStream_t stream = 0);
+// Optional device heights use an x-fastest grid of kAggregateClearTile squares.
+// Each height encloses all nonzero aggregate values in that square.
 void launch_clear_S(std::uint32_t* S, const SLayout3D& layout,
                     cudaStream_t stream = 0, int planes = 0,
-                    const TileExchangeRegion3D* rows = nullptr);
+                    const TileExchangeRegion3D* rows = nullptr,
+                    const int* tile_tops = nullptr);
 void launch_scatter_current(const ScatterArgs3D& args,
                             cudaStream_t stream = 0);
 void launch_scatter_promoted(const ScatterArgs3D& args,
