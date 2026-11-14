@@ -324,10 +324,14 @@ bool Sim3D::compact_promoted_fields() {
     const std::size_t probe_bytes = static_cast<std::size_t>(params_.num_cells) *
         (sizeof(int) + sizeof(std::uint32_t));
     if (probe_bytes > adaptive_budget_remaining_) return true;
-    if (gather_state_ && !gather_state_()) return false;
     // Bounding boxes must describe the accepted field, not the previous step.
-    if (!refresh_measurements(false, surface_current_, false) ||
-        !checked(cudaStreamSynchronize(stream_), "measure compaction candidates")) return false;
+    if (prepare_compaction_) {
+        if (!prepare_compaction_()) return false;
+    } else {
+        if (gather_state_ && !gather_state_()) return false;
+        if (!refresh_measurements(false, surface_current_, false)) return false;
+    }
+    if (!checked(cudaStreamSynchronize(stream_), "measure compaction candidates")) return false;
     std::vector<CellState3D> states(params_.num_cells);
     if (!checked(cudaMemcpy(states.data(), d_cells_, states.size() * sizeof(CellState3D),
                             cudaMemcpyDeviceToHost), "read compaction states")) return false;
@@ -360,6 +364,7 @@ bool Sim3D::compact_promoted_fields() {
         requested.emplace_back(id, candidates[id]);
     }
     if (requested.empty()) return true;
+    if (gather_state_ && !gather_state_()) return false;
     if (!resize_cells(requested, &states) || !reconstruct_current_S() ||
         !refresh_measurements(false, surface_current_, false)) return false;
     return synchronize_and_check("adaptive compaction");

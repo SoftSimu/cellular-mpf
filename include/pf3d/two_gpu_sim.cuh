@@ -49,6 +49,9 @@ private:
     bool finish_exchange(bool pending);
     bool merge_flags(bool include_states = false);
     bool gather_state();
+    bool prepare_trajectory();
+    bool prepare_compaction();
+    bool refresh_owned_records(bool compute_surface, bool apply_motion);
     bool capture_surfaces(SurfaceOutput3D&);
     bool capture_relaxation(RelaxationOutput3D&);
     bool distributed_step();

@@ -57,7 +57,7 @@ int main() {
         random ^= random << 17;
         byte = static_cast<unsigned char>(random);
     }
-    for (std::size_t offset = 0; offset < 8; ++offset) {
+    for (std::size_t offset = 0; offset < 16; ++offset) {
         for (std::size_t size = 0; size <= 521; ++size) {
             if (!check(bytes.data() + offset, size, 0)
                 || !check(bytes.data() + offset, size, random)
@@ -68,7 +68,7 @@ int main() {
     const auto full64 = ckpt3d::crc64_ecma_update(random, bytes.data(), bytes.size());
     const auto full32 = pf3d::surface::crc32_update(static_cast<std::uint32_t>(random),
                                                  bytes.data(), bytes.size());
-    for (const std::size_t chunk : {1u, 7u, 8u, 9u, 4093u, 65536u}) {
+    for (const std::size_t chunk : {1u, 7u, 8u, 9u, 15u, 16u, 17u, 4093u, 65536u}) {
         auto crc64 = random;
         auto crc32 = static_cast<std::uint32_t>(random);
         for (std::size_t offset = 0; offset < bytes.size(); offset += chunk) {

@@ -238,6 +238,8 @@ private:
     // healthy polls. It is idempotent until the next distributed step.
     std::function<bool()> distributed_step_;
     std::function<bool()> gather_state_;
+    std::function<bool()> prepare_trajectory_;
+    std::function<bool()> prepare_compaction_;
     std::function<bool(SurfaceOutput3D&)> capture_surfaces_;
     std::function<bool(RelaxationOutput3D&)> capture_relaxation_;
 

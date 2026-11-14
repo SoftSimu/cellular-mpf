@@ -60,6 +60,8 @@ TwoGpuSim3D::~TwoGpuSim3D() {
         if (!sim_[r]) continue;
         sim_[r]->distributed_step_ = {};
         sim_[r]->gather_state_ = {};
+        sim_[r]->prepare_trajectory_ = {};
+        sim_[r]->prepare_compaction_ = {};
         sim_[r]->capture_surfaces_ = {};
         sim_[r]->capture_relaxation_ = {};
         if (!select(r)) continue;
@@ -368,6 +370,8 @@ bool TwoGpuSim3D::initialize() {
          sizeof(flags_), cudaMemcpyDeviceToHost), "read initial integrity flags")) return false;
     primary.distributed_step_ = [this] { return distributed_step(); };
     primary.gather_state_ = [this] { return gather_state(); };
+    primary.prepare_trajectory_ = [this] { return prepare_trajectory(); };
+    primary.prepare_compaction_ = [this] { return prepare_compaction(); };
     primary.capture_surfaces_ = [this](SurfaceOutput3D& output) {
         return capture_surfaces(output);
     };
@@ -795,6 +799,44 @@ bool TwoGpuSim3D::distributed_step() {
         }
     }
     return select(0);
+}
+
+bool TwoGpuSim3D::refresh_owned_records(bool compute_surface, bool apply_motion) {
+    auto& primary = *sim_[0];
+    // Refresh on each owner, then collect records rather than remote fields.
+    for (int r = 0; r < 2; ++r)
+        if (!select(r) || !sim_[r]->refresh_measurements(false, compute_surface, apply_motion))
+            return false;
+    if (!merge_flags(true)) return false;
+    for (int f = 0; f < FLAG3D_COUNT; ++f)
+        if (flag3d_is_fatal(static_cast<Flag3D>(f)) && flags_[f] != 0)
+            return gather_state() && primary.synchronize_and_check("owned measurement");
+    for (std::size_t id = 0; id < canonical_.size(); ++id)
+        canonical_[id] = downloads_[owners_[id]].cells[id];
+    return enqueue_state_broadcast();
+}
+
+bool TwoGpuSim3D::prepare_trajectory() {
+    auto& primary = *sim_[0];
+    // Channel wall diagnostics still read the complete field array.
+    if (primary_canonical_ || primary.params_.resolved_wall_channel())
+        return primary.ensure_measurements(true, "trajectory measurement");
+    return refresh_owned_records(true, true);
+}
+
+bool TwoGpuSim3D::prepare_compaction() {
+    auto& primary = *sim_[0];
+    if (primary_canonical_)
+        return primary.refresh_measurements(false, primary.surface_current_, false) &&
+               primary.synchronize_and_check("compaction measurement");
+    if (!refresh_owned_records(primary.surface_current_, false)) return false;
+    if (primary_canonical_) return true;
+    // A shrink test reads only promoted fields. Base fields remain on their
+    // owners unless an accepted crop requires a canonical resize transaction.
+    // After a rejected crop, the primary's selection excludes these peer copies.
+    for (int id : primary.h_promoted_ids_)
+        if (owners_[id] == 1 && !copy_field(id, 1, 0)) return false;
+    return wait_all();
 }
 
 bool TwoGpuSim3D::capture_surfaces(SurfaceOutput3D& output) {

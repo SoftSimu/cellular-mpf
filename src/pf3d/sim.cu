@@ -2305,7 +2305,8 @@ bool Sim3D::open_trajectory() {
 
 bool Sim3D::append_trajectory() {
     if (!trajectory_file_) return true;
-    if (!ensure_measurements(true, "trajectory measurement"))
+    if (!(prepare_trajectory_ ? prepare_trajectory_()
+                             : ensure_measurements(true, "trajectory measurement")))
         return false;
     if (params_.resolved_wall_channel()) {
         launch_measure_wall_diagnostics(
