@@ -29,5 +29,6 @@ struct AggregateCoverage3D {
 AggregateCoverage3D *create_aggregate_coverage(const SLayout3D &, int cells, std::size_t available);
 void destroy_aggregate_coverage(AggregateCoverage3D *);
 bool prepare_aggregate_coverage(AggregateCoverage3D &, const UpdateArgs3D &, cudaStream_t);
-bool finish_aggregate_coverage(const UpdateArgs3D &, cudaStream_t);
+bool finish_aggregate_coverage(const UpdateArgs3D &, cudaStream_t,
+                               float* const* promoted_output = nullptr);
 } // namespace pf3d

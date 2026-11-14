@@ -177,6 +177,10 @@ Sim3D::~Sim3D() {
     close_trajectory();
     cudaSetDevice(options_.device);
     if (stream_) cudaStreamSynchronize(stream_);
+    if (promoted_measure_stream_) cudaStreamSynchronize(promoted_measure_stream_);
+    if (promoted_measure_ready_) cudaEventDestroy(promoted_measure_ready_);
+    if (promoted_measure_done_) cudaEventDestroy(promoted_measure_done_);
+    if (promoted_measure_stream_) cudaStreamDestroy(promoted_measure_stream_);
     destroy_aggregate_coverage(aggregate_coverage_);
     if (boundary_output_) {
         boundary_output_->close(false);
@@ -666,13 +670,23 @@ bool Sim3D::allocate(const SimParams3D& params,
         !gpu_ok(cudaEventCreate(&bench_start_), "cudaEventCreate(start)") ||
         !gpu_ok(cudaEventCreate(&bench_stop_), "cudaEventCreate(stop)"))
         return false;
+    if (params_.substrate_slab()) {
+        int lowest = 0, highest = 0;
+        if (!gpu_ok(cudaDeviceGetStreamPriorityRange(&lowest, &highest), "stream priorities") ||
+            !gpu_ok(cudaStreamCreateWithPriority(&promoted_measure_stream_, cudaStreamNonBlocking,
+                highest), "promoted measurement stream") ||
+            !gpu_ok(cudaEventCreateWithFlags(&promoted_measure_ready_, cudaEventDisableTiming),
+                "promoted measurement input event") ||
+            !gpu_ok(cudaEventCreateWithFlags(&promoted_measure_done_, cudaEventDisableTiming),
+                "promoted measurement completion event")) return false;
+    }
     auto allocate_device = [&](void** pointer, std::size_t bytes,
                                const char* name) {
         if (gpu_ok(cudaMalloc(pointer, bytes), name)) return true;
         return false;
     };
     if (selected_mode_ == StorageMode3D::Throughput && !options_.strict &&
-        params_.resolved_wall_channel() && B_ < layout_.nx && B_ < layout_.ny) {
+        params_.bounded_z() && B_ < layout_.nx && B_ < layout_.ny) {
         aggregate_coverage_ = create_aggregate_coverage(
             layout_, params.num_cells, adaptive_budget_remaining_);
         if (!aggregate_coverage_) {
@@ -1542,6 +1556,7 @@ bool Sim3D::upload_promoted_tables() {
 
 bool Sim3D::reconstruct_current_S() {
     launch_clear_S(current_S(), layout_, stream_);
+    aggregate_dirty_rows_[current_S_index_] = {};
     ScatterArgs3D scatter{};
     scatter.phi = current_phi();
     scatter.cells = d_cells_;
@@ -1588,11 +1603,20 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
         ? params_.dt : 0.0;
     measure.compute_surface = compute_surface;
     measure.storage = field_storage_;
-    if (!launch_measure_cells_only(measure, stream_)) {
-        std::fprintf(stderr, "[3d] invalid base measurement launch contract\n");
-        return false;
-    }
-    if (!phase_mark(1)) return false;
+    const cudaStream_t promoted_stream = active_promoted_count() > 0 && promoted_measure_stream_
+        ? promoted_measure_stream_ : stream_;
+    if (promoted_stream != stream_ &&
+        (!gpu_ok(cudaEventRecord(promoted_measure_ready_, stream_), "publish measurement inputs") ||
+         !gpu_ok(cudaStreamWaitEvent(promoted_stream, promoted_measure_ready_, 0),
+            "wait for measurement inputs"))) return false;
+    const auto base_measurement = [&] {
+        if (!launch_measure_cells_only(measure, stream_)) {
+            std::fprintf(stderr, "[3d] invalid base measurement launch contract\n");
+            return false;
+        }
+        return phase_mark(1);
+    };
+    if (promoted_stream == stream_ && !base_measurement()) return false;
     if (active_promoted_count() > 0) {
         const int promoted_count = active_promoted_count();
         // The reduction grouping is a numerical contract for the full cohort,
@@ -1605,7 +1629,7 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
             if (!detail::launch_measure_promoted_shards(
                     sharded, d_promoted_phi_[current_promoted_phi_index_],
                     active_promoted_ids(), promoted_count, promoted_edge_,
-                    d_promoted_partials_, stream_)) {
+                    d_promoted_partials_, promoted_stream)) {
                 std::fprintf(stderr,
                     "[3d] invalid promoted measurement launch contract\n");
                 return false;
@@ -1613,13 +1637,19 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
         } else {
             if (!launch_measure_promoted(
                     measure, d_promoted_phi_[current_promoted_phi_index_],
-                    active_promoted_ids(), promoted_count, promoted_edge_, stream_)) {
+                    active_promoted_ids(), promoted_count, promoted_edge_, promoted_stream)) {
                 std::fprintf(stderr,
                     "[3d] invalid promoted measurement launch contract\n");
                 return false;
             }
         }
     }
+    // The cohorts write disjoint cells and partials; motion needs both results.
+    if (promoted_stream != stream_ && !base_measurement()) return false;
+    if (promoted_stream != stream_ &&
+        (!gpu_ok(cudaEventRecord(promoted_measure_done_, promoted_stream), "finish promoted measurement") ||
+         !gpu_ok(cudaStreamWaitEvent(stream_, promoted_measure_done_, 0),
+            "join promoted measurement"))) return false;
     if (!phase_mark(2)) return false;
     // Motion consumes the accepted-step Philox event exactly once, after all
     // base and promoted cells have refreshed V and interaction moments.
@@ -1751,8 +1781,11 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     const int next_phi = phi_buffers_ == 2 ? 1 - current_phi_index_
                                            : current_phi_index_;
     const int next_promoted_phi = 1 - current_promoted_phi_index_;
-    if (S_buffers_ == 2)
-        launch_clear_S(d_S_[next_S], layout_, stream_, aggregate_clear_planes_);
+    if (S_buffers_ == 2) {
+        launch_clear_S(d_S_[next_S], layout_, stream_, aggregate_clear_planes_,
+                       &aggregate_dirty_rows_[next_S]);
+        aggregate_dirty_rows_[next_S] = aggregate_write_rows_;
+    }
     if (!phase_mark(3)) return false;
 
     UpdateArgs3D update{};
@@ -1783,9 +1816,10 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     // refresh_measurements checked these immutable source arrays in this
     // stream. The update still checks newly computed values and its writes.
     update.inputs_measured = phi_buffers_ == 2 && params_.bounded_z();
-    // The proof covers one complete, unpartitioned base update. Split GPU
-    // passes and strict/in-place paths retain ordinary checked additions.
-    if (aggregate_coverage_ && !exchange_region && !selection_.ids &&
+    // Replay transmitted exceptions before the peer copy, and the remaining
+    // exceptions only after all interior base/promoted contributions.
+    const bool split_coverage = exchange_region && params_.substrate_slab();
+    if (aggregate_coverage_ && (!exchange_region || split_coverage) &&
         !measured_update && fast_base_update_shards(UpdateTilePass3D::All) > 1) {
         update.aggregate_bound = aggregate_coverage_->bound;
         if (!prepare_aggregate_coverage(*aggregate_coverage_, update, stream_))
@@ -1834,13 +1868,11 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
         std::fprintf(stderr, "[3d] invalid update launch contract\n");
         return false;
     }
-    if (update.aggregate_bound && !finish_aggregate_coverage(update, stream_))
-        return false;
     if (!phase_mark(4)) return false;
     if (active_promoted_count() > 0) {
         const int promoted_count = active_promoted_count();
-        const int promoted_shards =
-            measured_update ? 1 : promoted_update_shards(promoted_count);
+        const int promoted_shards = measured_update ? 1 :
+            std::max(update.aggregate_bound ? 2 : 1, promoted_update_shards(promoted_count));
         bool promoted_ok;
         if (!measured_update &&
             (update.tile_pass != UpdateTilePass3D::All || promoted_shards > 1)) {
@@ -1860,6 +1892,8 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
             return false;
         }
     }
+    if (update.aggregate_bound && !finish_aggregate_coverage(
+            update, stream_, d_promoted_phi_[next_promoted_phi])) return false;
     if (!phase_mark(5)) return false;
     pending_update_ = update;
     pending_measured_update_ = measured_update;
@@ -1883,6 +1917,8 @@ bool Sim3D::enqueue_interior_update() {
             d_promoted_phi_[1 - current_promoted_phi_index_], active_promoted_ids(),
             promoted_count, promoted_edge_, promoted_update_shards(promoted_count),
             stream_)) return false;
+    if (update.aggregate_bound && !finish_aggregate_coverage(
+            update, stream_, d_promoted_phi_[1 - current_promoted_phi_index_])) return false;
     // Both passes are now ordered in this stream; output may be accepted only
     // after the coordinator joins incoming copies and merges integrity flags.
     pending_update_.tile_pass = UpdateTilePass3D::All;

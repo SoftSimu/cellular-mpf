@@ -1512,6 +1512,21 @@ __global__ void k_clear_u32(std::uint32_t* data, std::size_t words) {
         data[q] = 0u;
 }
 
+__global__ void k_clear_S_rows(std::uint32_t* data, SLayout3D layout,
+                              TileExchangeRegion3D rows, int height) {
+    const int band = blockIdx.y;
+    const std::size_t width = static_cast<std::size_t>(layout.pitch_x) *
+        (rows.y_hi[band] - rows.y_lo[band]);
+    const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (int z = blockIdx.z; z < height; z += gridDim.z) {
+        auto* first = data + (static_cast<std::size_t>(z) * layout.ny +
+            rows.y_lo[band]) * layout.pitch_x;
+        for (std::size_t q = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                 threadIdx.x; q < width; q += stride)
+            first[q] = 0u;
+    }
+}
+
 __global__ void k_clear_selected_base_out(UpdateArgs3D args,
                                           int blocks_per_cell,
                                           bool complete_output) {
@@ -2006,11 +2021,15 @@ __global__ void k_finalize_measure_promoted(
     commit_measurement(args, n, B, total);
 }
 
-template <bool WallCoupling, bool ComputeSurface = false, int FixedEdge = 0>
+template <bool WallCoupling, bool ComputeSurface = false, int FixedEdge = 0,
+          bool PointerBacked = false>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_measure_cell_shards_impl(MeasureArgs3D args,
                                 const __grid_constant__ CUtensorMap tensor_map,
-                                const __grid_constant__ CUtensorMap aggregate_map) {
+                                const __grid_constant__ CUtensorMap aggregate_map,
+                                float* const* promoted_phi = nullptr,
+                                const int* promoted_ids = nullptr,
+                                int promoted_count = 0, int promoted_edge = 0) {
     if constexpr (FixedEdge != 0) args.B = FixedEdge;
     // A distinct extern symbol keeps its alignment independent of other kernels.
     extern __shared__ __align__(128) float tma_halo_pair[];
@@ -2029,14 +2048,19 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
     const int block = static_cast<int>(blockIdx.x);
     const int slot = block / args.shards;
     const int shard = block - slot * args.shards;
-    if (slot >= args.selection.selected_count(args.N)) return;
-    const int n = args.selection.cell_index(slot);
-    if (cell_is_promoted(args.cells[n], args.B)) return;
-
-    const int B = args.B;
+    const int count = PointerBacked ? promoted_count : args.selection.selected_count(args.N);
+    if (slot >= count) return;
+    const int n = PointerBacked ? promoted_ids[slot] : args.selection.cell_index(slot);
+    if constexpr (!PointerBacked)
+        if (cell_is_promoted(args.cells[n], args.B)) return;
+    const int B = PointerBacked
+        ? promoted_cell_edge(args.cells[n], args.B, promoted_edge) : args.B;
+    if constexpr (PointerBacked)
+        if (B == 0 || !promoted_phi[n]) return;
     const std::size_t words = stored_cell_words(B, args.storage);
     CellState3D* state = &args.cells[n];
-    const float* tile = args.phi + static_cast<std::size_t>(n) * words;
+    const float* tile = PointerBacked ? promoted_phi[n]
+        : args.phi + static_cast<std::size_t>(n) * words;
     if (threadIdx.x == 0) {
         initialize_tma_barrier(&ready[0]);
         initialize_tma_barrier(&ready[1]);
@@ -2083,7 +2107,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
         const int z = tz * kBrickZ - 1;
         int first_z = 0, last_z = 0;
         // Reflected wall ghosts retain the established scalar-copy path.
-        const bool use_bulk = fetch_z(z, &first_z)
+        const bool use_bulk = !PointerBacked && fetch_z(z, &first_z)
             && fetch_z(z + kHaloZ - 1, &last_z)
             && first_z == z && last_z == z + kHaloZ - 1;
         bulk_mask = (bulk_mask & ~(1u << buffer))
@@ -2319,7 +2343,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
             total.Iy *= 0x1p-28;
             total.Iz *= 0x1p-28;
         }
-        args.partials[static_cast<std::size_t>(n) * args.shards + shard] = total;
+        args.partials[static_cast<std::size_t>(PointerBacked ? slot : n) * args.shards + shard] = total;
     }
 }
 
@@ -2536,7 +2560,8 @@ __global__ void k_clear_promoted_out(UpdateArgs3D args,
         out[q] = 0.0f;
 }
 
-template <bool WallCoupling, UpdateTilePass3D Pass = UpdateTilePass3D::All>
+template <bool WallCoupling, UpdateTilePass3D Pass = UpdateTilePass3D::All,
+          bool BoundedAggregate = false>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_update_promoted_sharded_fast_impl(
     UpdateArgs3D args, float* const* promoted_phi_in,
@@ -2555,7 +2580,7 @@ void k_update_promoted_sharded_fast_impl(
         return;
     const int B = promoted_cell_edge(args.cells[n], args.B, promoted_edge);
     if (B == 0) return;
-    process_update_shard<false, WallCoupling, Pass>(
+    process_update_shard<false, WallCoupling, Pass, false, false, BoundedAggregate>(
         n, shard, shards_per_cell, args, promoted_phi_in[n],
         promoted_phi_out[n], B, nullptr, halo_pair, nullptr,
         &abort_flag);
@@ -3176,6 +3201,12 @@ cudaError_t configure_current_tile_kernels() {
             k_update_promoted_sharded_fast_impl<false>),
         reinterpret_cast<const void*>(
             k_update_promoted_sharded_fast_impl<true>),
+        reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<false, UpdateTilePass3D::All, true>),
+        reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<false, UpdateTilePass3D::Boundary, true>),
+        reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<false, UpdateTilePass3D::Interior, true>),
+        reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<true, UpdateTilePass3D::All, true>),
+        reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<true, UpdateTilePass3D::Boundary, true>),
+        reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<true, UpdateTilePass3D::Interior, true>),
         reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<
             false, UpdateTilePass3D::Boundary>),
         reinterpret_cast<const void*>(k_update_promoted_sharded_fast_impl<
@@ -3188,6 +3219,7 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_measure_promoted_shards_impl<true>),
     };
     const void* const bulk_copy_kernels[] = {
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, false, 0, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 160>),
@@ -3195,6 +3227,12 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Boundary, 160, false, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::Interior, 160, false, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 176, false, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 176, true, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Boundary, 176, true, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Interior, 176, true, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 0, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Boundary, 0, true>),
+        reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Interior, 0, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Boundary, 176, false, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Interior, 176, false, true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true, UpdateTilePass3D::All, 0, true>),
@@ -3277,11 +3315,34 @@ cudaError_t clear_base_output(const UpdateArgs3D& args,
 
 // The exchange partition changes scheduling, not the wall term or stencil.
 // Both passes use the same geometry specialization as the unsplit update.
+template <int Edge, bool Measured>
+void enqueue_bounded_base(const UpdateArgs3D& args, int blocks, int shards,
+                          const CUtensorMap& tensor_map, cudaStream_t stream) {
+    if (args.tile_pass == UpdateTilePass3D::Boundary)
+        k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Boundary, Edge, true, Measured>
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards, tensor_map);
+    else if (args.tile_pass == UpdateTilePass3D::Interior)
+        k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::Interior, Edge, true, Measured>
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards, tensor_map);
+    else
+        k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, Edge, true, Measured>
+            <<<blocks, kThreads3D, kTmaPipelineBytes, stream>>>(args, shards, tensor_map);
+}
+
 template <bool WallCoupling>
 void enqueue_base_fast_pass(const UpdateArgs3D& args, int count,
                             int shards_per_cell, const CUtensorMap& tensor_map,
                             cudaStream_t stream) {
     const int blocks = count * shards_per_cell;
+    if constexpr (!WallCoupling) {
+        if (args.aggregate_bound) {
+            if (args.B == 176 && args.inputs_measured)
+                enqueue_bounded_base<176, true>(args, blocks, shards_per_cell, tensor_map, stream);
+            else
+                enqueue_bounded_base<0, false>(args, blocks, shards_per_cell, tensor_map, stream);
+            return;
+        }
+    }
     if constexpr (WallCoupling) {
         if (args.aggregate_bound) {
             if (args.B == 160)
@@ -3347,7 +3408,7 @@ void enqueue_base_fast_pass(const UpdateArgs3D& args, int count,
                 args, shards_per_cell, tensor_map);
 }
 
-template <bool WallCoupling>
+template <bool WallCoupling, bool BoundedAggregate = false>
 void enqueue_promoted_fast_pass(
     const UpdateArgs3D& args, float* const* promoted_phi_in,
     float* const* promoted_phi_out, const int* promoted_ids,
@@ -3356,18 +3417,18 @@ void enqueue_promoted_fast_pass(
     const int blocks = promoted_count * shards_per_cell;
     if (args.tile_pass == UpdateTilePass3D::Boundary)
         k_update_promoted_sharded_fast_impl<WallCoupling,
-                                            UpdateTilePass3D::Boundary>
+                                            UpdateTilePass3D::Boundary, BoundedAggregate>
             <<<blocks, kThreads3D, kHaloPipelineBytes, stream>>>(
                 args, promoted_phi_in, promoted_phi_out, promoted_ids,
                 promoted_count, promoted_edge, shards_per_cell);
     else if (args.tile_pass == UpdateTilePass3D::Interior)
         k_update_promoted_sharded_fast_impl<WallCoupling,
-                                            UpdateTilePass3D::Interior>
+                                            UpdateTilePass3D::Interior, BoundedAggregate>
             <<<blocks, kThreads3D, kHaloPipelineBytes, stream>>>(
                 args, promoted_phi_in, promoted_phi_out, promoted_ids,
                 promoted_count, promoted_edge, shards_per_cell);
     else
-        k_update_promoted_sharded_fast_impl<WallCoupling>
+        k_update_promoted_sharded_fast_impl<WallCoupling, UpdateTilePass3D::All, BoundedAggregate>
             <<<blocks, kThreads3D, kHaloPipelineBytes, stream>>>(
                 args, promoted_phi_in, promoted_phi_out, promoted_ids,
                 promoted_count, promoted_edge, shards_per_cell);
@@ -3400,9 +3461,16 @@ void launch_initialize_spheres(const InitArgs3D& args, cudaStream_t stream) {
 }
 
 void launch_clear_S(std::uint32_t* S, const SLayout3D& layout,
-                    cudaStream_t stream, int planes) {
+                    cudaStream_t stream, int planes,
+                    const TileExchangeRegion3D* rows) {
     if (S == nullptr || layout.words() == 0) return;
     const auto height = planes > 0 ? std::min(planes, layout.nz) : layout.nz;
+    if (rows && rows->y_count > 0 &&
+        valid_tile_exchange_region(*rows, layout.ny, layout.nz)) {
+        const dim3 grid(64, rows->y_count, std::min(32, height));
+        k_clear_S_rows<<<grid, kThreads3D, 0, stream>>>(S, layout, *rows, height);
+        return;
+    }
     const auto words = static_cast<std::size_t>(layout.pitch_x) * layout.ny * height;
     const int blocks = static_cast<int>(std::min<std::size_t>(
         4096, (words + kThreads3D - 1) / kThreads3D));
@@ -3711,6 +3779,17 @@ bool launch_update_promoted_sharded_fast(
         if (cudaPeekAtLastError() != cudaSuccess) return false;
     }
     const bool wall_coupling = args.layout.hard_wall_channel();
+    if (args.aggregate_bound) {
+        if (wall_coupling)
+            enqueue_promoted_fast_pass<true, true>(
+                args, promoted_phi_in, promoted_phi_out, promoted_ids,
+                promoted_count, promoted_edge, shards_per_cell, stream);
+        else
+            enqueue_promoted_fast_pass<false, true>(
+                args, promoted_phi_in, promoted_phi_out, promoted_ids,
+                promoted_count, promoted_edge, shards_per_cell, stream);
+        return cudaPeekAtLastError() == cudaSuccess;
+    }
     if (wall_coupling)
         enqueue_promoted_fast_pass<true>(
             args, promoted_phi_in, promoted_phi_out, promoted_ids,
@@ -3736,7 +3815,16 @@ bool launch_measure_promoted_shards(
         return false;
     if (set_tile_kernel_smem_limit() != cudaSuccess) return false;
     const bool wall_coupling = args.layout.hard_wall_channel();
-    if (wall_coupling)
+    if (args.layout.substrate_slab() && !args.compute_surface) {
+        CUtensorMap unused{}, aggregate_map{};
+        if (!aggregate_tensor_map(args.S, args.layout, &aggregate_map)) return false;
+        auto measured = args;
+        measured.partials = promoted_partials;
+        k_measure_cell_shards_impl<false, false, 0, true>
+            <<<promoted_count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
+                measured, unused, aggregate_map, promoted_phi, promoted_ids,
+                promoted_count, promoted_edge);
+    } else if (wall_coupling)
         k_measure_promoted_shards_impl<true>
             <<<promoted_count * args.shards, kThreads3D,
                kHaloPipelineBytes, stream>>>(
@@ -3804,8 +3892,8 @@ bool launch_update_tiled_sharded_fast(const UpdateArgs3D& args,
                                       int shards_per_cell,
                                       cudaStream_t stream) {
     const bool partial = args.tile_pass != UpdateTilePass3D::All;
-    if (args.aggregate_bound && (partial || args.selection.ids ||
-        !args.layout.hard_wall_channel() || args.B >= args.layout.nx ||
+    if (args.aggregate_bound && ((partial && !args.layout.substrate_slab()) ||
+        !args.layout.bounded_z() || args.B >= args.layout.nx ||
         args.B >= args.layout.ny)) return false;
     if (!valid_update_partition(args) || (partial && shards_per_cell < 1)
         || args.N <= 0 || !args.selection.valid(args.N)) return false;

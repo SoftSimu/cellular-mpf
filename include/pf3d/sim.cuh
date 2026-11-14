@@ -193,6 +193,9 @@ private:
     int S_buffers_ = 0;
     // Upper bound on dirty planes in the next aggregate buffer; zero clears all.
     int aggregate_clear_planes_ = 0;
+    // Each buffer retains its own last write envelope; an empty envelope clears all rows.
+    TileExchangeRegion3D aggregate_dirty_rows_[2]{};
+    TileExchangeRegion3D aggregate_write_rows_{};
     int scratch_slots_ = 0;
     int current_phi_index_ = 0;
     int current_S_index_ = 0;
@@ -255,6 +258,9 @@ private:
     TrajPackedCell3D* d_trajectory_ = nullptr;
 
     cudaStream_t stream_ = nullptr;
+    cudaStream_t promoted_measure_stream_ = nullptr;
+    cudaEvent_t promoted_measure_ready_ = nullptr;
+    cudaEvent_t promoted_measure_done_ = nullptr;
     cudaEvent_t bench_start_ = nullptr;
     cudaEvent_t bench_stop_ = nullptr;
 

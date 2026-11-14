@@ -410,6 +410,30 @@ bool TwoGpuSim3D::configure_ownership(bool canonical_fields) {
         plans_[r] = build_seam_exchange_plan(geometry_, sim_[r]->B_, r, bricks.data(),
                                              bricks.size(), sizeof(std::uint32_t));
         if (plans_[r].status != SeamPlanStatus::Ok) return fail("invalid seam plan");
+        // An owner's half-domain plus the maximum brick overhang encloses both
+        // its scatter writes and every incoming seam row, without a field cutoff.
+        const auto owned = rank_ownership(geometry_, r);
+        // Tightening the transferred rows does not reduce this allocated-edge bound.
+        const auto halo = plans_[r].bands.half_width;
+        const auto lo = owned.y_lo - halo, hi = owned.y_hi + halo;
+        TileExchangeRegion3D rows{};
+        rows.z_hi = geometry_.nz;
+        if (hi - lo < geometry_.ny) {
+            if (lo < 0) {
+                rows.y_count = 2;
+                rows.y_lo[0] = 0; rows.y_hi[0] = static_cast<int>(hi);
+                rows.y_lo[1] = static_cast<int>(lo + geometry_.ny);
+                rows.y_hi[1] = geometry_.ny;
+            } else if (hi > geometry_.ny) {
+                rows.y_count = 2;
+                rows.y_lo[0] = 0; rows.y_hi[0] = static_cast<int>(hi - geometry_.ny);
+                rows.y_lo[1] = static_cast<int>(lo); rows.y_hi[1] = geometry_.ny;
+            } else {
+                rows.y_count = 1;
+                rows.y_lo[0] = static_cast<int>(lo); rows.y_hi[0] = static_cast<int>(hi);
+            }
+        }
+        sim_[r]->aggregate_write_rows_ = rows;
     }
     if (sim_[0]->layout_.bounded_z()) {
         int planes = 0;
@@ -675,6 +699,9 @@ bool TwoGpuSim3D::distributed_step() {
             if (flag3d_is_fatal(static_cast<Flag3D>(f)) && flags_[f] != 0)
                 return fail("integrity failure during commit; durable checkpoint retained");
     if (fatal) {
+        // Repair may copy the complete input aggregate into the pending buffer.
+        for (auto& sim : sim_)
+            sim->aggregate_dirty_rows_[sim->current_S_index_] = {};
         // Every rank rolled back under the same fatal flag. Only the canonical
         // solver performs adaptive recovery; the next step replicates its result.
         return gather_state() && primary.synchronize_and_check("distributed recovery");
