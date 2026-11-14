@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace pf3d {
@@ -38,8 +39,8 @@ struct DeviceScope {
 };
 
 template<int FixedEdge = 0>
-__global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa,
-                         Partial* partials) {
+__global__ __launch_bounds__(kThreads, 3)
+void measure(RelaxationDeviceView3D view, double lambda, double kappa, Partial* partials) {
     const auto& fields = view.fields;
     const int id = fields.selection.cell_index(blockIdx.y);
     const auto& state = fields.cells[id];
@@ -58,45 +59,66 @@ __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa
     const int begin = static_cast<int>(max(0LL, -static_cast<long long>(state.origin_z)));
     const int end = static_cast<int>(min(static_cast<long long>(B),
         static_cast<long long>(view.layout.nz) - state.origin_z));
-    const std::size_t plane = static_cast<std::size_t>(B) * B;
-    const std::size_t words = end > begin ? plane * (end - begin) : 0;
-    for (std::size_t q = blockIdx.x * blockDim.x + threadIdx.x; phi && q < words;
+    using Index = std::conditional_t<(FixedEdge > 0 && FixedEdge <= 1024),
+                                     std::uint32_t, std::size_t>;
+    const Index plane = static_cast<Index>(B) * B;
+    const Index words = end > begin ? plane * (end - begin) : 0;
+    for (Index q = blockIdx.x * blockDim.x + threadIdx.x; phi && q < words;
          q += kShards * blockDim.x) {
         const int x = static_cast<int>(q % B);
         const int y = static_cast<int>((q / B) % B);
         const int z = begin + static_cast<int>(q / plane);
-        const float stored = phi[fields.storage.index(x, y, z, B, state.origin_z)];
+        const float* centre = phi + fields.storage.index(x, y, z, B, state.origin_z);
+        const float stored = *centre;
         if (stored == 0.0f) continue;
         const double p = stored, square = p * p;
-        // All stencil samples share three physical planes. Resolve reflection
-        // and compact storage once per plane, retaining the original sum order.
-        std::size_t planes[3];
-        int signs[3];
-#pragma unroll
-        for (int dz = -1; dz <= 1; ++dz) {
-            int source_z = 0;
-            signs[dz + 1] = phase_fetch_local_z(view.layout, state.origin_z, z + dz, B, &source_z);
-            planes[dz + 1] = fields.storage.index(0, 0, source_z, B, state.origin_z);
-        }
-        const auto sample = [&](int dx, int dy, int dz) {
-            const int sx = x + dx, sy = y + dy;
-            if (static_cast<unsigned>(sx) >= static_cast<unsigned>(B) ||
-                static_cast<unsigned>(sy) >= static_cast<unsigned>(B) || !signs[dz + 1])
-                return 0.0;
-            return signs[dz + 1] * static_cast<double>(
-                phi[planes[dz + 1] + static_cast<std::size_t>(sy) * B + sx]);
-        };
         double lap = kLapCentreW * p;
+        double plus_x, plus_y;
+        // Interior planes are contiguous in both cubic and compact storage.
+        // Keep the signed ghost-plane mapping only at a physical/support face.
+        if (x > 0 && x + 1 < B && y > 0 && y + 1 < B && z > begin && z + 1 < end) {
 #pragma unroll
-        for (int dz = -1; dz <= 1; ++dz)
+            for (int dz = -1; dz <= 1; ++dz)
 #pragma unroll
-            for (int dy = -1; dy <= 1; ++dy)
+                for (int dy = -1; dy <= 1; ++dy)
 #pragma unroll
-                for (int dx = -1; dx <= 1; ++dx) {
-                    const int distance = (dx != 0) + (dy != 0) + (dz != 0);
-                    if (distance) lap += (distance == 1 ? kLapFaceW : distance == 2 ? kLapEdgeW : kLapCornerW)
-                        * sample(dx, dy, dz);
-                }
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int distance = (dx != 0) + (dy != 0) + (dz != 0);
+                        if (distance) lap += (distance == 1 ? kLapFaceW : distance == 2 ? kLapEdgeW : kLapCornerW)
+                            * static_cast<double>(centre[(dz * B + dy) * B + dx]);
+                    }
+            plus_x = centre[1];
+            plus_y = centre[B];
+        } else {
+            std::size_t planes[3];
+            int signs[3];
+#pragma unroll
+            for (int dz = -1; dz <= 1; ++dz) {
+                int source_z = 0;
+                signs[dz + 1] = phase_fetch_local_z(view.layout, state.origin_z, z + dz, B, &source_z);
+                planes[dz + 1] = fields.storage.index(0, 0, source_z, B, state.origin_z);
+            }
+            const auto sample = [&](int dx, int dy, int dz) {
+                const int sx = x + dx, sy = y + dy;
+                if (static_cast<unsigned>(sx) >= static_cast<unsigned>(B) ||
+                    static_cast<unsigned>(sy) >= static_cast<unsigned>(B) || !signs[dz + 1])
+                    return 0.0;
+                return signs[dz + 1] * static_cast<double>(
+                    phi[planes[dz + 1] + static_cast<std::size_t>(sy) * B + sx]);
+            };
+#pragma unroll
+            for (int dz = -1; dz <= 1; ++dz)
+#pragma unroll
+                for (int dy = -1; dy <= 1; ++dy)
+#pragma unroll
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int distance = (dx != 0) + (dy != 0) + (dz != 0);
+                        if (distance) lap += (distance == 1 ? kLapFaceW : distance == 2 ? kLapEdgeW : kLapCornerW)
+                            * sample(dx, dy, dz);
+                    }
+            plus_x = sample(1, 0, 0);
+            plus_y = sample(0, 1, 0);
+        }
         lap /= kLapDenom;
         const std::uint32_t total = view.aggregate[s_index(view.layout,
             wrap_offset(ox, x, view.layout.nx), wrap_offset(oy, y, view.layout.ny),
@@ -115,8 +137,8 @@ __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa
         local.q[5] += x * weighted_G; local.q[6] += y * weighted_G; local.q[7] += z * weighted_G;
         local.q[8] += weighted_K;
         local.q[9] += x * weighted_K; local.q[10] += y * weighted_K; local.q[11] += z * weighted_K;
-        local.q[12] += p * sample(1, 0, 0);
-        local.q[13] += p * sample(0, 1, 0);
+        local.q[12] += p * plus_x;
+        local.q[13] += p * plus_y;
     }
     __shared__ double sums[kSums][kThreads];
 #pragma unroll
