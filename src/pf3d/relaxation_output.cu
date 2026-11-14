@@ -37,13 +37,18 @@ struct DeviceScope {
     ~DeviceScope() { gpu_ok(cudaSetDevice(device), "restore device"); }
 };
 
+template<int FixedEdge = 0>
 __global__ void measure(RelaxationDeviceView3D view, double lambda, double kappa,
                          Partial* partials) {
     const auto& fields = view.fields;
     const int id = fields.selection.cell_index(blockIdx.y);
     const auto& state = fields.cells[id];
-    const int B = cell_support_edge(state, fields.base_edge);
-    const float* phi = cell_is_promoted(state, fields.base_edge) ? fields.promoted_phi[id]
+    const bool promoted = cell_is_promoted(state, fields.base_edge);
+    if constexpr (FixedEdge != 0) {
+        if (promoted) return;
+    } else if (fields.base_edge == 176 && !promoted) return;
+    const int B = FixedEdge != 0 ? FixedEdge : cell_support_edge(state, fields.base_edge);
+    const float* phi = promoted ? fields.promoted_phi[id]
         : fields.base_phi + static_cast<std::size_t>(id) * fields.storage.words(fields.base_edge);
     Partial local{};
     if (!phi) local.q[0] = nan("");
@@ -241,7 +246,12 @@ struct RelaxationOutput3D::Impl {
             }
             auto& ws = **found;
             if (!ws.allocate(params.num_cells)) return false;
-            measure<<<dim3(kShards, selected), kThreads, 0, fields.stream>>>(
+            // Constant base geometry removes repeated integer division per voxel.
+            // The two launches write disjoint cell slots with the same reduction order.
+            if (fields.base_edge == 176)
+                measure<176><<<dim3(kShards, selected), kThreads, 0, fields.stream>>>(
+                    view, params.lambda, params.kappa, ws.partials);
+            measure<><<<dim3(kShards, selected), kThreads, 0, fields.stream>>>(
                 view, params.lambda, params.kappa, ws.partials);
             RELAX_CUDA(cudaGetLastError());
             finalize<<<(selected + kThreads - 1) / kThreads, kThreads, 0, fields.stream>>>(

@@ -219,6 +219,8 @@ Sim3D::~Sim3D() {
     if (d_wall_psi_sq_) cudaFree(d_wall_psi_sq_);
     for (float*& field : d_phi_)
         if (field) cudaFree(field);
+    for (auto* ranges : field_dirty_planes_)
+        if (ranges) cudaFree(ranges);
     if (stream_) cudaStreamDestroy(stream_);
 }
 
@@ -699,6 +701,17 @@ bool Sim3D::allocate(const SimParams3D& params,
     for (int i = 0; i < phi_buffers_; ++i)
         if (!allocate_device(reinterpret_cast<void**>(&d_phi_[i]), one_phi,
                              "cudaMalloc(phi)")) return false;
+    const auto range_bytes = static_cast<std::size_t>(params_.num_cells) * sizeof(int2);
+    if (phi_buffers_ == 2 && params_.bounded_z() && !options_.strict &&
+        range_bytes <= adaptive_budget_remaining_ / 2) {
+        for (auto& ranges : field_dirty_planes_)
+            if (!allocate_device(reinterpret_cast<void**>(&ranges), range_bytes,
+                                 "cudaMalloc(field write ranges)") ||
+                !gpu_ok(cudaMemsetAsync(ranges, 0xff, range_bytes, stream_),
+                        "initialize field write ranges")) return false;
+        required_device_bytes_ += 2 * range_bytes;
+        adaptive_budget_remaining_ -= 2 * range_bytes;
+    }
     for (int i = 0; i < S_buffers_; ++i)
         if (!allocate_device(reinterpret_cast<void**>(&d_S_[i]),
                              one_S,
@@ -1555,6 +1568,11 @@ bool Sim3D::upload_promoted_tables() {
 
 
 bool Sim3D::reconstruct_current_S() {
+    // Checkpoint loads, ownership transfers and recovery can replace fields.
+    const auto range_bytes = static_cast<std::size_t>(params_.num_cells) * sizeof(int2);
+    for (auto* ranges : field_dirty_planes_)
+        if (ranges && !gpu_ok(cudaMemsetAsync(ranges, 0xff, range_bytes, stream_),
+                             "invalidate field write ranges")) return false;
     launch_clear_S(current_S(), layout_, stream_);
     aggregate_dirty_rows_[current_S_index_] = {};
     ScatterArgs3D scatter{};
@@ -1792,6 +1810,7 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
     update.storage = field_storage_;
     update.phi_in = current_phi();
     update.phi_out = phi_buffers_ == 2 ? d_phi_[next_phi] : nullptr;
+    update.output_dirty_planes = field_dirty_planes_[next_phi];
     update.S_in = current_S();
     update.S_out = S_buffers_ == 2 ? d_S_[next_S] : nullptr;
     update.wall = weighted_wall_field();

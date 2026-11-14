@@ -1537,6 +1537,15 @@ __global__ void k_clear_selected_base_out(UpdateArgs3D args,
     if (cell_is_promoted(args.cells[n], args.B)) return;
     const std::size_t words = stored_cell_words(args.B, args.storage);
     float* out = args.phi_out + static_cast<std::size_t>(n) * words;
+    const std::size_t plane = static_cast<std::size_t>(args.B) * args.B;
+    std::size_t dirty_begin = 0, dirty_end = words;
+    if (args.output_dirty_planes) {
+        const auto previous = args.output_dirty_planes[n];
+        if (previous.x >= 0) {
+            dirty_begin = static_cast<std::size_t>(previous.x) * plane;
+            dirty_end = static_cast<std::size_t>(previous.y) * plane;
+        }
+    }
     std::size_t written_begin = 0, written_end = 0;
     if (complete_output && unshifted_output(args.cells[n])) {
         if (!args.layout.bounded_z()) return;
@@ -1544,20 +1553,41 @@ __global__ void k_clear_selected_base_out(UpdateArgs3D args,
             args.layout.nz, args.layout.reflect_upper(), args.layout.odd_upper());
         if (map.lo < map.hi) {
             const int offset = args.storage.compact(args.B) ? map.origin : 0;
-            const std::size_t plane = static_cast<std::size_t>(args.B) * args.B;
             written_begin = static_cast<std::size_t>(offset + map.lo) * plane;
             written_end = static_cast<std::size_t>(offset + map.hi) * plane;
         }
     }
-    // The unshifted fast update overwrites every valid plane, including zeros.
-    // Clear the complement even if the other ping-pong buffer held an older
-    // origin; shifted cells still take the original full-clear path.
-    const std::size_t written_words = written_end - written_begin;
+    // Clear old writes that this update will not overwrite. Outside the previous
+    // range the buffer is already zero; unknown history retains the full clear.
+    const std::size_t overlap_begin = max(dirty_begin, written_begin);
+    const std::size_t overlap_end = min(dirty_end, written_end);
+    const std::size_t overwritten = overlap_end > overlap_begin
+        ? overlap_end - overlap_begin : 0;
     const std::size_t stride =
         static_cast<std::size_t>(blocks_per_cell) * blockDim.x;
     for (std::size_t q = static_cast<std::size_t>(part) * blockDim.x
-                       + threadIdx.x; q < words - written_words; q += stride)
-        out[q < written_begin ? q : q + written_words] = 0.0f;
+                       + threadIdx.x; q < dirty_end - dirty_begin - overwritten; q += stride) {
+        const auto at = dirty_begin + q;
+        out[overwritten && at >= overlap_begin ? at + overwritten : at] = 0.0f;
+    }
+}
+
+__global__ void k_remember_field_write_ranges(UpdateArgs3D args) {
+    const int slot = blockIdx.x * blockDim.x + threadIdx.x;
+    if (slot >= args.selection.selected_count(args.N)) return;
+    const int n = args.selection.cell_index(slot);
+    if (cell_is_promoted(args.cells[n], args.B)) return;
+    const auto& cell = args.cells[n];
+    std::int64_t origin = 0;
+    if (!checked_world_coordinate(cell.origin_z, cell.pending_shift_z, &origin)) {
+        args.output_dirty_planes[n] = make_int2(-1, -1);
+        return;
+    }
+    const auto map = BoundedZMap::make(origin, args.B, args.layout.nz,
+        args.layout.reflect_upper(), args.layout.odd_upper());
+    const int offset = args.storage.compact(args.B) ? map.origin : 0;
+    args.output_dirty_planes[n] = map.lo < map.hi
+        ? make_int2(offset + map.lo, offset + map.hi) : make_int2(0, 0);
 }
 
 __global__ void k_scatter_current(ScatterArgs3D args) {
@@ -3300,7 +3330,7 @@ bool checked_stored_field_bytes(int N, int B, const CellFieldStorage3D& storage,
 cudaError_t clear_base_output(const UpdateArgs3D& args,
                               std::size_t phi_bytes, cudaStream_t stream,
                               bool complete_output = false) {
-    if (!complete_output && args.selection.ids == nullptr)
+    if (!complete_output && args.selection.ids == nullptr && !args.output_dirty_planes)
         return cudaMemsetAsync(args.phi_out, 0, phi_bytes, stream);
     constexpr int kClearBlocksPerCell = 64;
     const int count = args.selection.selected_count(args.N);
@@ -3310,6 +3340,8 @@ cudaError_t clear_base_output(const UpdateArgs3D& args,
     k_clear_selected_base_out<<<count * kClearBlocksPerCell,
                                 kThreads3D, 0, stream>>>(
         args, kClearBlocksPerCell, complete_output);
+    if (args.output_dirty_planes)
+        k_remember_field_write_ranges<<<(count + 127) / 128, 128, 0, stream>>>(args);
     return cudaPeekAtLastError();
 }
 
@@ -3645,6 +3677,8 @@ bool launch_update_tiled(const UpdateArgs3D& args, int grid_blocks,
     else
         k_update_tiled_impl<false>
             <<<grid_blocks, kThreads3D, kHaloPipelineBytes, stream>>>(args);
+    if (args.output_dirty_planes)
+        k_remember_field_write_ranges<<<(count + 127) / 128, 128, 0, stream>>>(args);
     return cudaPeekAtLastError() == cudaSuccess;
 }
 
@@ -3885,6 +3919,8 @@ bool launch_update_tiled_fast(const UpdateArgs3D& args, int grid_blocks,
     else
         k_update_tiled_fast_impl<false>
             <<<grid_blocks, kThreads3D, kHaloPipelineBytes, stream>>>(args);
+    if (args.output_dirty_planes)
+        k_remember_field_write_ranges<<<(count + 127) / 128, 128, 0, stream>>>(args);
     return cudaPeekAtLastError() == cudaSuccess;
 }
 

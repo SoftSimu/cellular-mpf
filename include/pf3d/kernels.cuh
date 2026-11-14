@@ -352,6 +352,9 @@ struct UpdateArgs3D {
     // Requires completed, same-stream measurement of the unchanged phi/S:
     // every physical input is finite and S >= q_of(phi), or a fatal flag is set.
     bool inputs_measured = false;
+    // Previous possible nonzero stored-z range of phi_out; negative means unknown.
+    // Reset to unknown after replacing fields outside the update launchers.
+    int2* output_dirty_planes = nullptr;
 };
 
 struct TrajPackedCell3D {

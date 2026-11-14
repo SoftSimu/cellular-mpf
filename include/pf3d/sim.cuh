@@ -196,6 +196,7 @@ private:
     // Each buffer retains its own last write envelope; an empty envelope clears all rows.
     TileExchangeRegion3D aggregate_dirty_rows_[2]{};
     TileExchangeRegion3D aggregate_write_rows_{};
+    int2* field_dirty_planes_[2]{};
     int scratch_slots_ = 0;
     int current_phi_index_ = 0;
     int current_S_index_ = 0;
