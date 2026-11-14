@@ -1795,7 +1795,14 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
                     cudaMemcpyDeviceToDevice, stream_),
                 "snapshot accepted cell state"))
         return false;
-    if (!refresh_measurements(true, full_moment)) return false;
+    defer_measurement_ = exchange_region && !options_.strict &&
+        early_selection_.ids && early_selection_.count > 0 &&
+        deferred_selection_.ids && deferred_selection_.count > 0;
+    const auto owned_selection = selection_;
+    if (defer_measurement_) selection_ = early_selection_;
+    const bool measured = refresh_measurements(true, full_moment);
+    selection_ = owned_selection;
+    if (!measured) return false;
     const int next_S = S_buffers_ == 2 ? 1 - current_S_index_ : current_S_index_;
     const int next_phi = phi_buffers_ == 2 ? 1 - current_phi_index_
                                            : current_phi_index_;
@@ -1852,6 +1859,7 @@ bool Sim3D::begin_step(const TileExchangeRegion3D* exchange_region) {
         update.tile_pass = UpdateTilePass3D::Boundary;
         update.exchange_region = *exchange_region;
     }
+    if (defer_measurement_) update.selection = early_selection_;
     bool update_ok = true;
     if (phi_buffers_ == 2) {
         if (measured_update && measurement_shards_ > 1) {
@@ -1928,6 +1936,26 @@ bool Sim3D::enqueue_interior_update() {
         return false;
     }
     auto update = pending_update_;
+    if (defer_measurement_) {
+        // Every deferred cell is unpromoted and disjoint from outgoing rows.
+        const auto owned_selection = selection_;
+        const int promoted_count = owned_promoted_count_;
+        selection_ = deferred_selection_;
+        owned_promoted_count_ = 0;
+        const bool full_moment = params_.full_moment_every > 0 &&
+            steps_done_ % static_cast<std::uint64_t>(params_.full_moment_every) == 0;
+        const bool measured = refresh_measurements(true, full_moment);
+        selection_ = owned_selection;
+        owned_promoted_count_ = promoted_count;
+        if (!measured) return false;
+        // All-pass clears this cohort's output using its newly computed shifts.
+        auto deferred = update;
+        deferred.selection = deferred_selection_;
+        deferred.tile_pass = UpdateTilePass3D::All;
+        if (!detail::launch_update_tiled_sharded_fast(
+                deferred, fast_base_update_shards(UpdateTilePass3D::Interior), stream_))
+            return false;
+    }
     update.tile_pass = UpdateTilePass3D::Interior;
     if (!detail::launch_update_tiled_sharded_fast(
             update, fast_base_update_shards(update.tile_pass), stream_)) return false;
@@ -1938,11 +1966,13 @@ bool Sim3D::enqueue_interior_update() {
             d_promoted_phi_[1 - current_promoted_phi_index_], active_promoted_ids(),
             promoted_count, promoted_edge_, promoted_update_shards(promoted_count),
             stream_)) return false;
+    update.selection = selection_;
     if (update.aggregate_bound && !finish_aggregate_coverage(
             update, stream_, d_promoted_phi_[1 - current_promoted_phi_index_])) return false;
     // Both passes are now ordered in this stream; output may be accepted only
     // after the coordinator joins incoming copies and merges integrity flags.
     pending_update_.tile_pass = UpdateTilePass3D::All;
+    pending_update_.selection = selection_;
     return gpu_ok(cudaGetLastError(), "3D interior update launch sequence");
 }
 

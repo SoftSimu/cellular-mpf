@@ -229,6 +229,9 @@ private:
     bool volume_current_ = true;
     bool surface_current_ = true;
     CellSelection3D selection_{};
+    // Two-GPU stepping measures cells that supply exchanged rows first.
+    CellSelection3D early_selection_{}, deferred_selection_{};
+    bool defer_measurement_ = false;
     int* d_owned_promoted_ids_ = nullptr;
     int owned_promoted_count_ = -1;
     UpdateArgs3D pending_update_{};

@@ -116,9 +116,13 @@ TwoGpuSim3D::~TwoGpuSim3D() {
             checked(cudaEventDestroy(exchange_ready_[r]), "destroy exchange-ready event");
         if (exchange_sent_[r])
             checked(cudaEventDestroy(exchange_sent_[r]), "destroy exchange-sent event");
+        if (exchange_joined_[r])
+            checked(cudaEventDestroy(exchange_joined_[r]), "destroy exchange-joined event");
         if (exchange_streams_[r])
             checked(cudaStreamDestroy(exchange_streams_[r]), "destroy exchange stream");
         cudaFree(d_ids_[r]);
+        cudaFree(d_early_ids_[r]);
+        cudaFree(d_deferred_ids_[r]);
         cudaFree(d_receive_[r]);
         cudaFree(d_clear_tile_tops_[r]);
     }
@@ -387,7 +391,7 @@ bool TwoGpuSim3D::initialize() {
     }
     for (int r = 0; r < 2; ++r) {
         auto& sim = *sim_[r];
-        const std::size_t reserved = receive_bytes + 2 * id_bytes +
+        const std::size_t reserved = receive_bytes + 4 * id_bytes +
             clear_tile_count_ * sizeof(int);
         if (reserved > sim.adaptive_budget_remaining_)
             return fail("peer-exchange workspace exceeds the configured memory budget");
@@ -396,10 +400,16 @@ bool TwoGpuSim3D::initialize() {
                      "allocate peer receive workspace") ||
             !checked(cudaMalloc(reinterpret_cast<void**>(&d_ids_[r]), id_bytes),
                      "allocate owner list") ||
+            !checked(cudaMalloc(reinterpret_cast<void**>(&d_early_ids_[r]), id_bytes),
+                     "allocate early measurement IDs") ||
+            !checked(cudaMalloc(reinterpret_cast<void**>(&d_deferred_ids_[r]), id_bytes),
+                     "allocate deferred measurement IDs") ||
             !checked(cudaEventCreateWithFlags(&exchange_ready_[r], cudaEventDisableTiming),
                      "create exchange-ready event") ||
             !checked(cudaEventCreateWithFlags(&exchange_sent_[r], cudaEventDisableTiming),
                      "create exchange-sent event") ||
+            !checked(cudaEventCreateWithFlags(&exchange_joined_[r], cudaEventDisableTiming),
+                     "create exchange-joined event") ||
             !checked(cudaStreamCreateWithFlags(&exchange_streams_[r], cudaStreamNonBlocking),
                      "create exchange stream")) return false;
         sim.adaptive_budget_remaining_ -= reserved;
@@ -434,6 +444,39 @@ bool TwoGpuSim3D::enqueue_state_broadcast() {
         if (!select(r) || !checked(cudaMemcpyAsync(sim_[r]->d_cells_, upload_.cells,
              canonical_.size() * sizeof(CellState3D), cudaMemcpyHostToDevice,
              sim_[r]->stream_), "replicate accepted metadata")) return false;
+    return select(0);
+}
+
+bool TwoGpuSim3D::configure_measurement_order() {
+    for (int r = 0; r < 2; ++r) {
+        auto& sim = *sim_[r];
+        if (!select(r)) return false;
+        TileExchangeRegion3D region{};
+        const auto& plan = plans_[r];
+        region.y_count = plan.bands.rows.count;
+        for (int b = 0; b < region.y_count; ++b) {
+            region.y_lo[b] = plan.bands.rows.pieces[b].lo;
+            region.y_hi[b] = plan.bands.rows.pieces[b].hi;
+        }
+        region.z_lo = plan.z.lo;
+        region.z_hi = plan.z.hi;
+        std::vector<int> early, deferred;
+        for (int id : ids_[r]) {
+            const auto& cell = canonical_[id];
+            const int B = cell_support_edge(cell, sim.B_);
+            const int oy = static_cast<int>((cell.origin_y % geometry_.ny + geometry_.ny) % geometry_.ny);
+            const bool boundary = tile_intersects_exchange_canonical(
+                region, geometry_.ny, oy, cell.origin_z, 0, 0, B, B);
+            // Keep promoted measurements concurrent with the first base cohort.
+            (B > sim.B_ || boundary ? early : deferred).push_back(id);
+        }
+        if (!early.empty() && !checked(cudaMemcpy(d_early_ids_[r], early.data(),
+                early.size() * sizeof(int), cudaMemcpyHostToDevice), "upload early IDs")) return false;
+        if (!deferred.empty() && !checked(cudaMemcpy(d_deferred_ids_[r], deferred.data(),
+                deferred.size() * sizeof(int), cudaMemcpyHostToDevice), "upload deferred IDs")) return false;
+        sim.early_selection_ = {d_early_ids_[r], static_cast<int>(early.size())};
+        sim.deferred_selection_ = {d_deferred_ids_[r], static_cast<int>(deferred.size())};
+    }
     return select(0);
 }
 
@@ -519,6 +562,7 @@ bool TwoGpuSim3D::configure_ownership(bool canonical_fields) {
     // Recentering changes exchange bounds, not the owner lists. Canonical
     // gathers still require reinstalling the selections they cleared.
     if (!canonical_fields && !migrated && !storage_changed && !owners_.empty()) {
+        if (!configure_measurement_order()) return false;
         planned_bricks_ = std::move(bricks);
         return select(0);
     }
@@ -565,6 +609,7 @@ bool TwoGpuSim3D::configure_ownership(bool canonical_fields) {
         sim.owned_promoted_count_ = static_cast<int>(promoted.size());
         if (!checked(cudaStreamSynchronize(sim.stream_), "finish ownership upload")) return false;
     }
+    if (!configure_measurement_order()) return false;
     if (canonical_fields || migrated) {
         for (int r = 0; r < 2; ++r)
             if (!select(r) || !sim_[r]->reconstruct_current_S()) return false;
@@ -633,29 +678,31 @@ bool TwoGpuSim3D::finish_exchange(bool pending) {
     std::uint32_t* sums[2] = {
         pending ? sim_[0]->pending_update_.S_out : sim_[0]->current_S(),
         pending ? sim_[1]->pending_update_.S_out : sim_[1]->current_S()};
-    // Interior work precedes this join in each compute stream. Both sends must
-    // finish before either receive is added: an already-merged sum
-    // must never be sent back to its original contributor.
+    // Interior tiles cannot write transmitted rows. Join those rows on the
+    // copy stream after both sends, while disjoint interior updates continue.
     for (int r = 0; r < 2; ++r) {
         if (!select(r) ||
-            !checked(cudaStreamWaitEvent(sim_[r]->stream_, exchange_sent_[r], 0),
+            !checked(cudaStreamWaitEvent(exchange_streams_[r], exchange_sent_[r], 0),
                      "wait for outgoing seam copy") ||
-            !checked(cudaStreamWaitEvent(sim_[r]->stream_, exchange_sent_[1-r], 0),
+            !checked(cudaStreamWaitEvent(exchange_streams_[r], exchange_sent_[1-r], 0),
                      "wait for incoming seam copy")) return false;
         const auto& incoming = plans_[1-r];
-        if (incoming.payload_bytes == 0) continue;
-        for (int b = 0; b < incoming.bands.rows.count; ++b) {
+        for (int b = 0; incoming.payload_bytes != 0 && b < incoming.bands.rows.count; ++b) {
             const auto rows = incoming.bands.rows.pieces[b];
             const std::size_t band_words = static_cast<std::size_t>(geometry_.pitch_x) *
                                             (rows.hi - rows.lo);
             const unsigned x_blocks = static_cast<unsigned>(
                 std::min<std::size_t>(32, (band_words + 255) / 256));
             const dim3 grid(x_blocks, std::min(32, incoming.z.hi - incoming.z.lo));
-            add_rows<<<grid, 256, 0, sim_[r]->stream_>>>(sums[r], d_receive_[r],
+            add_rows<<<grid, 256, 0, exchange_streams_[r]>>>(sums[r], d_receive_[r],
                 geometry_.pitch_x, geometry_.ny, rows.lo, rows.hi - rows.lo,
                 incoming.z.lo, incoming.z.hi - incoming.z.lo, sim_[r]->d_flags_);
         }
         if (!checked(cudaGetLastError(), "merge seam rows")) return false;
+        if (!checked(cudaEventRecord(exchange_joined_[r], exchange_streams_[r]),
+                     "record joined aggregate") ||
+            !checked(cudaStreamWaitEvent(sim_[r]->stream_, exchange_joined_[r], 0),
+                     "wait for joined aggregate")) return false;
     }
     return select(0);
 }

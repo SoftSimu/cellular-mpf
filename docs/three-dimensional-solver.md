@@ -99,6 +99,11 @@ fixed for that segment. As cells move, ownership follows this partition; the
 fields themselves are never split between GPUs. Checkpoints retain cell
 identities and random-number state independently of device ownership.
 
+Cells contributing to exchanged rows are measured and updated first. Their
+transfers overlap the remaining cells' measurements and interior updates;
+received sums are merged before the step is accepted. Each cell keeps its
+existing reduction order and random-number sequence.
+
 See the [solver reference](solver-reference.md) for numerical details and
 [initialization from relaxed 2D positions](relaxed-2d-slab-initialization.md)
 for preparing a substrate or single-layer channel.
