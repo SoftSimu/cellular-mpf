@@ -93,6 +93,12 @@ Use `cell_gh200_3d_two_gpu` with the same run arguments plus
 It requires two matching GPUs with CUDA peer access. Each GPU must fit the
 full simulation in memory.
 
+Whole cells are assigned by their position along `y`. The partition is chosen
+at initialization or restart to balance the allocated update tiles, then held
+fixed for that segment. As cells move, ownership follows this partition; the
+fields themselves are never split between GPUs. Checkpoints retain cell
+identities and random-number state independently of device ownership.
+
 See the [solver reference](solver-reference.md) for numerical details and
 [initialization from relaxed 2D positions](relaxed-2d-slab-initialization.md)
 for preparing a substrate or single-layer channel.

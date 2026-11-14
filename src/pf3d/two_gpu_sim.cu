@@ -8,6 +8,7 @@
  */
 
 #include "pf3d/two_gpu_sim.cuh"
+#include "pf3d/bounded_z_map.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -29,6 +30,42 @@ bool fail(const char* message) {
     return false;
 }
 
+// A fixed spatial cut balances live allocated tiles without per-step migration
+// decisions. Tile counts include the allocated height inside the domain.
+int balanced_y_cut(const std::vector<CellState3D>& cells, int base_edge,
+                   const TwoRankSubstrateGeometry& geometry) {
+    std::vector<std::pair<int, double>> weights;
+    double total = 0.0, original_left = 0.0;
+    for (const auto& cell : cells) {
+        const int edge = cell_support_edge(cell, base_edge);
+        const auto map = BoundedZMap::make(cell.origin_z, edge, geometry.nz, true);
+        const int ztiles = (map.hi + kBrickZ - 1) / kBrickZ - map.lo / kBrickZ;
+        const double weight = static_cast<double>((edge + kBrickX - 1) / kBrickX) *
+            ((edge + kBrickY - 1) / kBrickY) * ztiles;
+        const int midpoint = static_cast<int>((cell.origin_y % geometry.ny +
+            geometry.ny + edge / 2) % geometry.ny);
+        weights.emplace_back(midpoint, weight);
+        total += weight;
+        if (midpoint < geometry.ny / 2) original_left += weight;
+    }
+    std::sort(weights.begin(), weights.end());
+    const double original_cost = std::max(original_left, total - original_left);
+    double left = 0.0, best_cost = original_cost;
+    int best = geometry.ny / 2;
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+        left += weights[i].second;
+        if (i + 1 < weights.size() && weights[i].first == weights[i + 1].first)
+            continue;
+        const int cut = weights[i].first + 1;
+        const double cost = std::max(left, total - left);
+        if (cut < geometry.ny && cost < best_cost) {
+            best_cost = cost;
+            best = cut;
+        }
+    }
+    return best_cost < original_cost * 0.97 ? best : geometry.ny / 2;
+}
+
 // Quantized contributions are nonnegative integers. Joining disjoint cell
 // cohorts therefore preserves the single-device sum exactly unless it overflows.
 __global__ void add_rows(std::uint32_t* sum, const std::uint32_t* received,
@@ -43,7 +80,9 @@ __global__ void add_rows(std::uint32_t* sum, const std::uint32_t* received,
         for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
                              threadIdx.x; i < band_words;
              i += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
-            const uint4 a = out[i], b = in[i];
+            const uint4 b = in[i];
+            if ((b.x | b.y | b.z | b.w) == 0u) continue;
+            const uint4 a = out[i];
             if (b.x > 0xffffffffu - a.x) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
             if (b.y > 0xffffffffu - a.y) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
             if (b.z > 0xffffffffu - a.z) atomicAdd(flags + FLAG3D_S_OVERFLOW, 1u);
@@ -332,6 +371,9 @@ bool TwoGpuSim3D::initialize() {
     }
     if (!read_states(0)) return false;
     std::copy_n(downloads_[0].cells, canonical_.size(), canonical_.begin());
+    geometry_.y_cut = balanced_y_cut(canonical_, primary.B_, geometry_);
+    std::printf("[two-gpu] work-balanced y partition at %d/%d\n",
+                geometry_.y_cut, geometry_.ny);
     if (!clone_peer()) return false;
     const std::size_t receive_bytes = primary.S_words_ * sizeof(std::uint32_t);
     const std::size_t id_bytes = canonical_.size() * sizeof(int);
@@ -432,7 +474,7 @@ bool TwoGpuSim3D::configure_ownership(bool canonical_fields) {
         plans_[r] = build_seam_exchange_plan(geometry_, sim_[r]->B_, r, bricks.data(),
                                              bricks.size(), sizeof(std::uint32_t));
         if (plans_[r].status != SeamPlanStatus::Ok) return fail("invalid seam plan");
-        // An owner's half-domain plus the maximum brick overhang encloses both
+        // An owner's subdomain plus the maximum brick overhang encloses both
         // its scatter writes and every incoming seam row, without a field cutoff.
         const auto owned = rank_ownership(geometry_, r);
         // Tightening the transferred rows does not reduce this allocated-edge bound.

@@ -27,6 +27,7 @@ struct TwoRankSubstrateGeometry {
     int nz = 0;
     int pitch_x = 0;  // uint32 words per world-y row
     std::uint32_t boundary_flags = 0;
+    int y_cut = 0;  // zero selects the midpoint
 };
 
 enum class TwoRankValidation {
@@ -34,7 +35,8 @@ enum class TwoRankValidation {
     NonPositiveExtent,
     NonSquareLateralDomain,
     UnexpectedPitch,
-    WrongBoundaryFlags
+    WrongBoundaryFlags,
+    InvalidPartition
 };
 
 inline TwoRankValidation validate(const TwoRankSubstrateGeometry& geometry) {
@@ -44,6 +46,8 @@ inline TwoRankValidation validate(const TwoRankSubstrateGeometry& geometry) {
     }
     if (geometry.nx != geometry.ny)
         return TwoRankValidation::NonSquareLateralDomain;
+    if (geometry.y_cut < 0 || geometry.y_cut >= geometry.ny)
+        return TwoRankValidation::InvalidPartition;
     const std::int64_t expected_pitch =
         32LL * ((static_cast<std::int64_t>(geometry.nx) + 31LL) / 32LL);
     if (expected_pitch > std::numeric_limits<int>::max() ||
@@ -87,7 +91,7 @@ inline RankOwnership rank_ownership(const TwoRankSubstrateGeometry& geometry,
         (rank != 0 && rank != 1)) {
         return {};
     }
-    const int cut = geometry.ny / 2;
+    const int cut = geometry.y_cut > 0 ? geometry.y_cut : geometry.ny / 2;
     return rank == 0 ? RankOwnership{0, cut}
                      : RankOwnership{cut, geometry.ny};
 }
@@ -189,7 +193,7 @@ inline SeamBands seam_band_union(const TwoRankSubstrateGeometry& geometry,
     bands.domain_rows = geometry.ny;
     bands.half_width = half_width;
     bands.interior_cut = substrate_planner_detail::band_around(
-        geometry.ny / 2, half_width, geometry.ny);
+        rank_ownership(geometry, 0).y_hi, half_width, geometry.ny);
     bands.periodic_cut = substrate_planner_detail::band_around(
         0, half_width, geometry.ny);
     bands.rows = substrate_planner_detail::canonical_union(
@@ -334,12 +338,12 @@ inline bool cell_owner_rank(const AllocatedBrick& cell,
     std::int64_t midpoint = origin_y % geometry.ny;
     if (midpoint < 0) midpoint += geometry.ny;
     midpoint = (midpoint + edge / 2) % geometry.ny;
-    *owner = midpoint < geometry.ny / 2 ? 0 : 1;
+    *owner = midpoint < rank_ownership(geometry, 0).y_hi ? 0 : 1;
     return true;
 }
 
 // At an overlap between ranks, at least one brick crosses into the other
-// owner's half-domain. Those overhangs bound every required peer contribution,
+// owner's subdomain. Those overhangs bound every required peer contribution,
 // including arbitrarily small field tails; no phase-field threshold is used.
 inline bool allocated_seam_rows(const TwoRankSubstrateGeometry& geometry,
                                  std::uint32_t base_edge,

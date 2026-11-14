@@ -940,7 +940,8 @@ __device__ __forceinline__ int next_update_tile(
 template <bool CollectMoments, bool WallCoupling,
           UpdateTilePass3D Pass = UpdateTilePass3D::All,
           bool CompleteOutput = false, bool BulkCopies = false,
-          bool BoundedAggregate = false, bool InputsMeasured = false>
+          bool BoundedAggregate = false, bool InputsMeasured = false,
+          bool SkipEmptyTiles = !InputsMeasured || WallCoupling>
 __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                                      const UpdateArgs3D& args,
                                      const float* source, float* destination,
@@ -1096,10 +1097,10 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             bool nonzero_halo = true;
             // Dense bounded cells rarely have an empty halo. Retain the
             // load barrier without scanning the shared tile a second time.
-            if constexpr (InputsMeasured && !WallCoupling)
-                __syncthreads();
-            else
+            if constexpr (SkipEmptyTiles)
                 nonzero_halo = halo_any_nonzero<row_stride>(shared_phi);
+            else
+                __syncthreads();
             if (!nonzero_halo) {
                 if constexpr (CompleteOutput) {
                     if (*output_complete != 0) {
@@ -2637,6 +2638,15 @@ void k_update_promoted_sharded_fast_impl(
         return;
     const int B = promoted_cell_edge(args.cells[n], args.B, promoted_edge);
     if (B == 0) return;
+    if (!WallCoupling && args.inputs_measured) {
+        // Larger bricks retain the empty-tile shortcut while sharing the
+        // validated-input, two-row stencil used by ordinary cells.
+        process_update_shard<false, WallCoupling, Pass, false, false,
+                             BoundedAggregate, true, true>(
+            n, shard, shards_per_cell, args, promoted_phi_in[n],
+            promoted_phi_out[n], B, nullptr, halo_pair, nullptr, &abort_flag);
+        return;
+    }
     process_update_shard<false, WallCoupling, Pass, false, false, BoundedAggregate>(
         n, shard, shards_per_cell, args, promoted_phi_in[n],
         promoted_phi_out[n], B, nullptr, halo_pair, nullptr,
