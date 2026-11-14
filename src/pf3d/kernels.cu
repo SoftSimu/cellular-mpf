@@ -65,6 +65,7 @@ struct PendingScatter3D {
     __device__ __forceinline__ void add(std::uint32_t* aggregate,
         std::size_t index, float phi, CellState3D* cell,
         std::uint32_t* global_flags) {
+        if (fabsf(phi) <= kQZeroPhiMax) return;
         if (phi * phi > kQClampPhiSq)
             raise_flag(cell, global_flags, FLAG3D_Q_CLAMP);
         const std::uint32_t value = q_of(phi);

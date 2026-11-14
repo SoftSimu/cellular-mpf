@@ -104,6 +104,9 @@ constexpr float  kQScaleF     = 134217728.0f;              // 2^27
 constexpr float  kQInvF       = 7.450580596923828125e-9f;  // 2^-27
 constexpr double kQInvD       = 7.450580596923828125e-9;
 constexpr float  kQClampPhiSq = 4.0f;
+constexpr float  kQZeroPhiMax = 0x1p-14f;
+static_assert(kQZeroPhiMax * kQZeroPhiMax * kQScaleF == 0.5f,
+              "zero-contribution cutoff must be the ties-to-even half unit");
 
 PF3D_HD PF3D_FORCEINLINE uint32_t q_of(float phi) {
     float value = phi * phi;

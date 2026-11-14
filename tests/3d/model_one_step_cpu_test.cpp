@@ -586,6 +586,17 @@ void test_uniform_column_reduction() {
            "neutral bottom uses an even ghost at its face");
 }
 
+void test_aggregate_zero_cutoff() {
+    const float cutoff = pf3d::kQZeroPhiMax;
+    const float below = std::nextafter(cutoff, 0.0f);
+    const float above = std::nextafter(cutoff, 1.0f);
+    for (float sign : {-1.0f, 1.0f}) {
+        expect(pf3d::q_of(sign * below) == 0u, "below-cutoff aggregate contribution is zero");
+        expect(pf3d::q_of(sign * cutoff) == 0u, "half-unit aggregate tie rounds to zero");
+        expect(pf3d::q_of(sign * above) == 1u, "first value above cutoff contributes one");
+    }
+}
+
 void test_measurement_resume_contract() {
     using namespace pf3d;
     using Result = BaseMeasureResumeResult;
@@ -624,6 +635,7 @@ int main() {
     test_periodic_translation();
     test_channel_placement_below_diameter();
     test_uniform_column_reduction();
+    test_aggregate_zero_cutoff();
     test_measurement_resume_contract();
     if (failures != 0) {
         std::fprintf(stderr, "%d 3-D one-step CPU-reference test(s) failed\n",

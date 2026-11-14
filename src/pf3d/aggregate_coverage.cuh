@@ -71,6 +71,9 @@ __global__ void k_set_coverage_limit(AggregateBound3D *bound) {
 __device__ __forceinline__ void scatter_with_coverage(unsigned *S, std::size_t index, float phi,
                                                       CellState3D *cell, unsigned *flags,
                                                       unsigned limit, AggregateBound3D *bound) {
+    // Q5.27 rounds this contribution to zero, including the half-unit tie.
+    if (fabsf(phi) <= kQZeroPhiMax)
+        return;
     const unsigned value = q_of(phi);
     if (!value)
         return;
