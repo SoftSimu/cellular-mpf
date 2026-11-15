@@ -342,7 +342,7 @@ __device__ __forceinline__ StencilValues3D advance_stencil_plane(
 
 // Force and surface measurements need only centred gradients. The force-only
 // reduction can apply the factor 1/2 once per shard instead of once per voxel.
-template <int RowStride = kHaloRowStride, bool Normalized = true>
+template <int RowStride = kHaloRowStride, bool Normalized = true, bool ComputeVertical = true>
 __device__ __forceinline__ void gradient3(const float* shared_phi,
                                            int hx, int hy, int hz,
                                            float* grad_x,
@@ -353,13 +353,14 @@ __device__ __forceinline__ void gradient3(const float* shared_phi,
                     - shared_phi[halo_index<RowStride>(hx - 1, hy, hz)]);
     *grad_y = scale * (shared_phi[halo_index<RowStride>(hx, hy + 1, hz)]
                     - shared_phi[halo_index<RowStride>(hx, hy - 1, hz)]);
-    *grad_z = scale * (shared_phi[halo_index<RowStride>(hx, hy, hz + 1)]
-                    - shared_phi[halo_index<RowStride>(hx, hy, hz - 1)]);
+    if constexpr (ComputeVertical)
+        *grad_z = scale * (shared_phi[halo_index<RowStride>(hx, hy, hz + 1)]
+                        - shared_phi[halo_index<RowStride>(hx, hy, hz - 1)]);
 }
 
 // Two shared-memory halo slabs overlap the next tile's asynchronous load with
 // the current stencil. They reproduce the synchronous loader's values exactly.
-template <int RowStride = kHaloRowStride, typename FetchZ>
+template <int RowStride = kHaloRowStride, int ZGhost = 1, typename FetchZ>
 __device__ __forceinline__ void prefetch_halo(const float* tile, int B,
                                                int tile_index, int tiles_x,
                                                int tiles_y,
@@ -371,9 +372,9 @@ __device__ __forceinline__ void prefetch_halo(const float* tile, int B,
     const int tz = tile_index / (tiles_x * tiles_y);
     const int x0 = tx * kBrickX - 1;
     const int y0 = ty * kBrickY - 1;
-    const int z0 = tz * kBrickZ - 1;
+    const int z0 = tz * kBrickZ - ZGhost;
     constexpr int vectors_per_row = kBrickX / 4;
-    constexpr int halo_rows = kHaloY * kHaloZ;
+    constexpr int halo_rows = kHaloY * (kBrickZ + 2 * ZGhost);
     for (int q = static_cast<int>(threadIdx.x);
          q < halo_rows * vectors_per_row; q += kThreads3D) {
         const int row = q / vectors_per_row;
@@ -443,10 +444,10 @@ __device__ __forceinline__ void prefetch_halo(const float* tile, int B,
 // tile's stencil work is bitwise neutral; NaN also compares nonzero and stays
 // visible to the integrity checks. Each thread scans only words it staged and
 // waited on; the final collective publishes all copies before stencil reads.
-template <int RowStride = kHaloRowStride>
+template <int RowStride = kHaloRowStride, int ZGhost = 1>
 __device__ __forceinline__ bool halo_any_nonzero(const float* shared_buf) {
     // Match prefetch_halo's float4-interior and scalar-ghost thread ownership.
-    constexpr int rows = kHaloY * kHaloZ, vectors_per_row = kBrickX / 4;
+    constexpr int rows = kHaloY * (kBrickZ + 2 * ZGhost), vectors_per_row = kBrickX / 4;
     static_assert(rows * vectors_per_row >= kThreads3D);
     const auto nonzero = [](float4 value) {
         return (value.x != 0.0f) | (value.y != 0.0f)
@@ -2090,6 +2091,10 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                                 float* const* promoted_phi = nullptr,
                                 const int* promoted_ids = nullptr,
                                 int promoted_count = 0, int promoted_edge = 0) {
+    static_assert(ComputeVertical || (!WallCoupling && !ComputeSurface));
+    // In-plane force needs x/y neighbours only; moments still visit every voxel.
+    constexpr int z_ghost = ComputeVertical ? 1 : 0;
+    constexpr int halo_planes = kBrickZ + 2 * z_ghost;
     if constexpr (FixedEdge != 0) args.B = FixedEdge;
     // A distinct extern symbol keeps its alignment independent of other kernels.
     extern __shared__ __align__(128) float tma_halo_pair[];
@@ -2157,31 +2162,31 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
     const int first_brick = brick_begin
         + (shard - begin_remainder + args.shards) % args.shards;
     float* const halo0 = halo_pair + kHaloLeadingPadding;
-    float* const halo1 = halo0 + kTmaBufferWords;
+    float* const halo1 = halo0 + kTmaBufferWordsFor<halo_planes>;
     unsigned bulk_mask = 0, phase_mask = 0;
     const auto stage = [&](int brick, int buffer) {
         float* destination = buffer == 0 ? halo0 : halo1;
         const int tx = brick % bricks_x;
         const int ty = (brick / bricks_x) % bricks_y;
         const int tz = brick / bricks_per_plane;
-        const int z = tz * kBrickZ - 1;
+        const int z = tz * kBrickZ - z_ghost;
         int first_z = 0, last_z = 0;
         // Reflected wall ghosts retain the established scalar-copy path.
         const bool use_bulk = !PointerBacked && fetch_z(z, &first_z)
-            && fetch_z(z + kHaloZ - 1, &last_z)
-            && first_z == z && last_z == z + kHaloZ - 1;
+            && fetch_z(z + halo_planes - 1, &last_z)
+            && first_z == z && last_z == z + halo_planes - 1;
         bulk_mask = (bulk_mask & ~(1u << buffer))
                   | (static_cast<unsigned>(use_bulk) << buffer);
         if (use_bulk) {
             if (threadIdx.x == 0)
-                load_tma_halo(&tensor_map, n, tx * kBrickX - 4,
+                load_tma_halo<halo_planes>(&tensor_map, n, tx * kBrickX - 4,
                     ty * kBrickY - 1, z + storage_z_offset,
                     destination - kHaloLeadingPadding, &ready[buffer]);
             // Empty groups preserve the pipeline's wait count when bulk and
             // reflected-wall loads alternate.
             __pipeline_commit();
         } else {
-            prefetch_halo<kTmaRowStride>(tile, B, brick, bricks_x, bricks_y, fetch_z,
+            prefetch_halo<kTmaRowStride, z_ghost>(tile, B, brick, bricks_x, bricks_y, fetch_z,
                           storage_z_offset, destination);
         }
     };
@@ -2218,7 +2223,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
         if constexpr (FixedEdge == 176)
             __syncthreads();
         else
-            nonzero_halo = halo_any_nonzero<kTmaRowStride>(shared_phi);
+            nonzero_halo = halo_any_nonzero<kTmaRowStride, z_ghost>(shared_phi);
         if (nonzero_halo) {
             const int bx = brick % bricks_x;
             const int by = (brick / bricks_x) % bricks_y;
@@ -2282,7 +2287,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                             return;
                     const int z = z0 + iz;
                     const float centre =
-                        shared_phi[halo_index<kTmaRowStride>(ix + 1, iy + 1, iz + 1)];
+                        shared_phi[halo_index<kTmaRowStride>(ix + 1, iy + 1, iz + z_ghost)];
                     const auto own = q_of(centre);
                     bad_aggregate |= prefetched < own;
                     float other = static_cast<float>(prefetched - own);
@@ -2301,8 +2306,8 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     // require the gradient at every voxel.
                     if (ComputeSurface || interaction != 0.0f) {
                         float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-                        gradient3<kTmaRowStride, WallCoupling || ComputeSurface>(
-                            shared_phi, ix + 1, iy + 1, iz + 1, &gx, &gy, &gz);
+                        gradient3<kTmaRowStride, WallCoupling || ComputeSurface, ComputeVertical>(
+                            shared_phi, ix + 1, iy + 1, iz + z_ghost, &gx, &gy, &gz);
                         if constexpr (ComputeSurface)
                             local.surface +=
                                 sqrt(static_cast<double>(gx) * gx + static_cast<double>(gy) * gy +
@@ -3290,6 +3295,7 @@ cudaError_t configure_current_tile_kernels() {
     };
     const void* const bulk_copy_kernels[] = {
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, false, 0, true>),
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, false, 0, true, false>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<true>),
         reinterpret_cast<const void*>(k_update_tiled_sharded_fast_impl<false, UpdateTilePass3D::All, 160>),
@@ -3601,9 +3607,12 @@ bool enqueue_base_measurement(const MeasureArgs3D& args, int count,
         if (args.B == 176) {
             if constexpr (!ComputeSurface) {
                 if (args.in_plane_force_only && args.layout.substrate_slab()) {
+                    CUtensorMap compact_map{};
+                    if (!field_tensor_map<kBrickZ>(args.phi, args.B, args.storage.planes(args.B),
+                            args.N, &compact_map)) return false;
                     k_measure_cell_shards_impl<false, false, 176, false, false>
-                        <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
-                            args, tensor_map, aggregate_map);
+                        <<<count * args.shards, kThreads3D, kTmaPipelineBytesFor<kBrickZ>, stream>>>(
+                            args, compact_map, aggregate_map);
                     return true;
                 }
             }
@@ -3910,10 +3919,16 @@ bool launch_measure_promoted_shards(
         if (!aggregate_tensor_map(args.S, args.layout, &aggregate_map)) return false;
         auto measured = args;
         measured.partials = promoted_partials;
-        k_measure_cell_shards_impl<false, false, 0, true>
-            <<<promoted_count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
-                measured, unused, aggregate_map, promoted_phi, promoted_ids,
-                promoted_count, promoted_edge);
+        if (args.in_plane_force_only)
+            k_measure_cell_shards_impl<false, false, 0, true, false>
+                <<<promoted_count * args.shards, kThreads3D, kTmaPipelineBytesFor<kBrickZ>, stream>>>(
+                    measured, unused, aggregate_map, promoted_phi, promoted_ids,
+                    promoted_count, promoted_edge);
+        else
+            k_measure_cell_shards_impl<false, false, 0, true>
+                <<<promoted_count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
+                    measured, unused, aggregate_map, promoted_phi, promoted_ids,
+                    promoted_count, promoted_edge);
     } else if (wall_coupling)
         k_measure_promoted_shards_impl<true>
             <<<promoted_count * args.shards, kThreads3D,

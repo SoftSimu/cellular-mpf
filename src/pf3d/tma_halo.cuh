@@ -20,12 +20,16 @@ namespace {
 // Tensor copies require 16-byte rows and a 128-byte shared base. Loading from
 // x-4 puts the left ghost at raw[3] and the first interior value at raw[4].
 constexpr int kTmaRowStride = 40;
-constexpr int kTmaBufferWords =
-    ((kHaloLeadingPadding + kTmaRowStride * kHaloY * kHaloZ + 31) / 32) * 32;
-constexpr unsigned kTmaHaloBytes = kTmaRowStride * kHaloY * kHaloZ * sizeof(float);
-constexpr unsigned kTmaPipelineBytes = 2 * kTmaBufferWords * sizeof(float);
+template <int TileDepth>
+constexpr int kTmaBufferWordsFor =
+    ((kHaloLeadingPadding + kTmaRowStride * kHaloY * TileDepth + 31) / 32) * 32;
+template <int TileDepth>
+constexpr unsigned kTmaPipelineBytesFor = 2 * kTmaBufferWordsFor<TileDepth> * sizeof(float);
+constexpr int kTmaBufferWords = kTmaBufferWordsFor<kHaloZ>;
+constexpr unsigned kTmaPipelineBytes = kTmaPipelineBytesFor<kHaloZ>;
 static_assert(kTmaBufferWords % 32 == 0);
 
+template <int TileDepth = kHaloZ>
 bool field_tensor_map(const float* field, int B, int planes, int N,
                       CUtensorMap* result) {
     struct Entry {
@@ -57,7 +61,7 @@ bool field_tensor_map(const float* field, int B, int planes, int N,
                                 static_cast<cuuint64_t>(N)};
     const cuuint64_t strides[3] = {edge * sizeof(float), edge * edge * sizeof(float),
                                   edge * edge * planes * sizeof(float)};
-    const cuuint32_t box[4] = {kTmaRowStride, kHaloY, kHaloZ, 1};
+    const cuuint32_t box[4] = {kTmaRowStride, kHaloY, TileDepth, 1};
     const cuuint32_t steps[4] = {1, 1, 1, 1};
     Entry entry{field, B, planes, N, {}};
     const CUresult status = encode(&entry.map, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4,
@@ -79,12 +83,14 @@ __device__ __forceinline__ void initialize_tma_barrier(unsigned long long* barri
                  "fence.proxy.async.shared::cta;" :: "r"(address) : "memory");
 }
 
+template <int TileDepth = kHaloZ>
 __device__ __forceinline__ void load_tma_halo(const CUtensorMap* map,
     int cell, int x, int y, int z, float* destination, unsigned long long* barrier) {
     const unsigned target = static_cast<unsigned>(__cvta_generic_to_shared(destination));
     const unsigned ready = static_cast<unsigned>(__cvta_generic_to_shared(barrier));
+    constexpr unsigned transaction_bytes = kTmaRowStride * kHaloY * TileDepth * sizeof(float);
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
-                 :: "r"(ready), "r"(kTmaHaloBytes) : "memory");
+                 :: "r"(ready), "r"(transaction_bytes) : "memory");
     asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes "
                  "[%0], [%1, {%2, %3, %4, %5}], [%6];"
                  :: "r"(target), "l"(map), "r"(x), "r"(y), "r"(z), "r"(cell),
