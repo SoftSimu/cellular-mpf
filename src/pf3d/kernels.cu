@@ -1407,10 +1407,13 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             };
             const auto visit_checked_tile = [&](auto measured_tag) {
                 if constexpr (!CollectMoments) {
-                    // Prove both source and translated destination intervals once.
-                    const bool interior = bounded_z && x0 + kBrickX <= B && y0 + kBrickY <= B &&
+                    // Each thread retains its x coordinate throughout the z walk.
+                    // Invalid destinations keep the checked path and its clip flag.
+                    const int x = x0 + static_cast<int>(threadIdx.x) % kBrickX;
+                    if (x >= B) return;
+                    const bool interior = bounded_z && y0 + kBrickY <= B &&
                                           z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi &&
-                                          x0 >= shift_x && x0 - shift_x + kBrickX <= B &&
+                                          x >= shift_x && x - shift_x < B &&
                                           y0 >= shift_y && y0 - shift_y + kBrickY <= B &&
                                           z0 >= shift_z && z0 - shift_z + kBrickZ <= B &&
                                           (!args.layout.free_top() ||
@@ -2238,9 +2241,12 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                 static_assert(kBrickY == row_stride || kBrickY == 2 * row_stride);
                 constexpr bool second_row_present = kBrickY == 2 * row_stride;
                 const int ix = static_cast<int>(threadIdx.x) % kBrickX;
+                const int x = x0 + ix;
+                // Clip padded x lanes once; valid lanes can retain the tile-wide
+                // z fast path. All lanes still reach the barrier after this lambda.
+                if (x >= B) return;
                 const int iy0 = static_cast<int>(threadIdx.x) / kBrickX;
                 const int iy1 = iy0 + row_stride;
-                const int x = x0 + ix;
                 const int y_first = y0 + iy0, y_second = y0 + iy1;
                 const bool first_valid = Interior || (x < B && y_first < B);
                 const bool second_valid =
@@ -2378,7 +2384,7 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                     local.hi_z = max(local.hi_z, z0 + 31 - __clz(support_planes));
                 }
             };
-            const bool interior = bounded_z && x0 + kBrickX <= B && y0 + kBrickY <= B &&
+            const bool interior = bounded_z && y0 + kBrickY <= B &&
                                   z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi &&
                                   (!args.layout.free_top() ||
                                    z_map.origin + z0 + kBrickZ < args.layout.nz);
