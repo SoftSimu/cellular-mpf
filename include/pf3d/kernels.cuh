@@ -310,6 +310,9 @@ struct MeasureArgs3D {
     bool compute_surface;
     CellSelection3D selection;
     CellFieldStorage3D storage{};
+    // Substrate stepping may omit Iz, which cannot affect in-plane translation.
+    // Output measurements leave this false and refresh all interaction moments.
+    bool in_plane_force_only = false;
 };
 
 struct AggregateBound3D;

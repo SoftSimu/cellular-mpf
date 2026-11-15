@@ -1621,6 +1621,8 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
     measure.integrate_motion_dt = apply_tumble && options_.record_planar_motion
         ? params_.dt : 0.0;
     measure.compute_surface = compute_surface;
+    measure.in_plane_force_only = layout_.substrate_slab() && apply_tumble &&
+                                  apply_motion && !compute_surface;
     measure.storage = field_storage_;
     const cudaStream_t promoted_stream = active_promoted_count() > 0 && promoted_measure_stream_
         ? promoted_measure_stream_ : stream_;

@@ -555,7 +555,8 @@ __device__ __forceinline__ void commit_measurement(
     if (args.compute_surface) state->surface = total.surface;
     state->Ix = total.Ix;
     state->Iy = total.Iy;
-    state->Iz = total.Iz;
+    if (!args.in_plane_force_only || !args.layout.substrate_slab() || args.compute_surface)
+        state->Iz = total.Iz;
     state->bb_lo_x = total.lo_x;
     state->bb_hi_x = total.hi_x;
     state->bb_lo_y = total.lo_y;
@@ -2081,7 +2082,7 @@ __global__ void k_finalize_measure_promoted(
 }
 
 template <bool WallCoupling, bool ComputeSurface = false, int FixedEdge = 0,
-          bool PointerBacked = false>
+          bool PointerBacked = false, bool ComputeVertical = true>
 __global__ __launch_bounds__(kThreads3D, 3)
 void k_measure_cell_shards_impl(MeasureArgs3D args,
                                 const __grid_constant__ CUtensorMap tensor_map,
@@ -2308,7 +2309,8 @@ void k_measure_cell_shards_impl(MeasureArgs3D args,
                                      static_cast<double>(gz) * gz);
                         local.Ix += static_cast<double>(interaction * gx);
                         local.Iy += static_cast<double>(interaction * gy);
-                        local.Iz += static_cast<double>(interaction * gz);
+                        if constexpr (ComputeVertical)
+                            local.Iz += static_cast<double>(interaction * gz);
                     }
                     if (iy == iy0)
                         first_max = max(first_max, __float_as_uint(fabsf(centre)));
@@ -3322,6 +3324,7 @@ cudaError_t configure_current_tile_kernels() {
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true, 160>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<true, true, 160>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, false, 176>),
+        reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, false, 176, false, false>),
         reinterpret_cast<const void*>(k_measure_cell_shards_impl<false, true, 176>),
     };
     for (const void* kernel : bulk_copy_kernels) {
@@ -3596,6 +3599,14 @@ bool enqueue_base_measurement(const MeasureArgs3D& args, int count,
     if (!aggregate_tensor_map(args.S, args.layout, &aggregate_map)) return false;
     if constexpr (!WallCoupling) {
         if (args.B == 176) {
+            if constexpr (!ComputeSurface) {
+                if (args.in_plane_force_only && args.layout.substrate_slab()) {
+                    k_measure_cell_shards_impl<false, false, 176, false, false>
+                        <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
+                            args, tensor_map, aggregate_map);
+                    return true;
+                }
+            }
             k_measure_cell_shards_impl<false, ComputeSurface, 176>
                 <<<count * args.shards, kThreads3D, kTmaPipelineBytes, stream>>>(
                     args, tensor_map, aggregate_map);
