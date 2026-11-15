@@ -1133,9 +1133,10 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
             const int y0 = ty * kBrickY;
             const int z0 = tz * kBrickZ;
 
-            const auto visit_tile = [&](auto interior_tag, auto measured_tag) {
+            const auto visit_tile = [&](auto interior_tag, auto measured_tag, auto clipped_tag) {
                 constexpr bool Measured = decltype(measured_tag)::value;
                 constexpr bool Interior = decltype(interior_tag)::value;
+                constexpr bool ClippedZ = decltype(clipped_tag)::value;
                 const float tile_interaction = Measured && !WallCoupling
                                                    ? interaction * kQInvF : interaction;
                 [[maybe_unused]] PendingScatter3D pending_scatter;
@@ -1291,24 +1292,29 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     const int wy0 = wrap_offset(origin_y, y, args.layout.ny);
                     const int wy1 = wrap_offset(origin_y, y + 1, args.layout.ny);
                     const int wx = wrap_offset(origin_x, x, args.layout.nx);
-                    const int first_world_z = z_map.origin + z0;
+                    const int first_iz = ClippedZ ? max(0, z_map.lo - z0) : 0;
+                    const int end_iz = ClippedZ ? min(kBrickZ, z_map.hi - z0) : kBrickZ;
+                    const int first_world_z = z_map.origin + z0 + first_iz;
                     std::size_t cursor0 = s_index(args.layout, wx, wy0, first_world_z);
                     std::size_t cursor1 = s_index(args.layout, wx, wy1, first_world_z);
                     const std::size_t plane_words =
                         static_cast<std::size_t>(args.layout.pitch_x) * args.layout.ny;
                     std::size_t destination_cursor = field_index_at_world_z(
-                        x - shift_x, y - shift_y, z0 - shift_z, first_world_z, B, args.storage);
+                        x - shift_x, y - shift_y, z0 + first_iz - shift_z,
+                        first_world_z, B, args.storage);
                     std::uint32_t current0 = load_aggregate_ahead(args.S_in + cursor0);
                     std::uint32_t current1 = load_aggregate_ahead(args.S_in + cursor1);
-                    std::uint32_t queued0 = load_aggregate_ahead(args.S_in + cursor0 + plane_words);
-                    std::uint32_t queued1 = load_aggregate_ahead(args.S_in + cursor1 + plane_words);
+                    std::uint32_t queued0 = first_iz + 1 < end_iz
+                        ? load_aggregate_ahead(args.S_in + cursor0 + plane_words) : 0u;
+                    std::uint32_t queued1 = first_iz + 1 < end_iz
+                        ? load_aggregate_ahead(args.S_in + cursor1 + plane_words) : 0u;
                     float p0[10], p1[10];
-                    load_stencil_pair<row_stride>(shared_phi, ix, iy, 0, p0);
-                    load_stencil_pair<row_stride>(shared_phi, ix, iy, 1, p1);
+                    load_stencil_pair<row_stride>(shared_phi, ix, iy, first_iz, p0);
+                    load_stencil_pair<row_stride>(shared_phi, ix, iy, first_iz + 1, p1);
                     const auto advance_pair = [&](float* below, const float* middle, int iz) {
-                        const std::uint32_t next0 = iz + 2 < kBrickZ
+                        const std::uint32_t next0 = iz + 2 < end_iz
                             ? load_aggregate_ahead(args.S_in + cursor0 + 2 * plane_words) : 0u;
-                        const std::uint32_t next1 = iz + 2 < kBrickZ
+                        const std::uint32_t next1 = iz + 2 < end_iz
                             ? load_aggregate_ahead(args.S_in + cursor1 + 2 * plane_words) : 0u;
                         StencilValues3D values[2];
                         advance_stencil_pair<row_stride>(shared_phi, ix, iy, iz, below, middle, values);
@@ -1320,9 +1326,9 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                         current0 = queued0; current1 = queued1;
                         queued0 = next0; queued1 = next1;
                     };
-                    for (int iz = 0; iz < kBrickZ; iz += 2) {
+                    for (int iz = first_iz; iz < end_iz; iz += 2) {
                         advance_pair(p0, p1, iz);
-                        if (iz + 1 < kBrickZ) advance_pair(p1, p0, iz + 1);
+                        if (iz + 1 < end_iz) advance_pair(p1, p0, iz + 1);
                     }
                 } else {
                     // A warp retains its x-row while advancing through z. Each
@@ -1411,19 +1417,30 @@ __device__ void process_update_shard(int n, int shard, int shards_per_cell,
                     // Invalid destinations keep the checked path and its clip flag.
                     const int x = x0 + static_cast<int>(threadIdx.x) % kBrickX;
                     if (x >= B) return;
+                    // The paired stencil can start at the first physical plane;
+                    // reflected halo values were already staged by fetch_z.
+                    constexpr bool clip_z = InputsMeasured && !WallCoupling;
+                    const int first_z = clip_z ? max(z0, z_map.lo) : z0;
+                    const int last_z = clip_z ? min(z0 + kBrickZ, z_map.hi) : z0 + kBrickZ;
                     const bool interior = bounded_z && y0 + kBrickY <= B &&
-                                          z0 >= z_map.lo && z0 + kBrickZ <= z_map.hi &&
+                                          first_z < last_z && first_z >= z_map.lo && last_z <= z_map.hi &&
                                           x >= shift_x && x - shift_x < B &&
                                           y0 >= shift_y && y0 - shift_y + kBrickY <= B &&
-                                          z0 >= shift_z && z0 - shift_z + kBrickZ <= B &&
+                                          first_z >= shift_z && last_z - shift_z <= B &&
                                           (!args.layout.free_top() ||
-                                           z_map.origin + z0 + kBrickZ < args.layout.nz);
-                    if (interior)
-                        visit_tile(std::true_type{}, measured_tag);
-                    else
-                        visit_tile(std::false_type{}, measured_tag);
+                                           z_map.origin + last_z < args.layout.nz);
+                    if (interior) {
+                        if constexpr (clip_z) {
+                            if (first_z != z0 || last_z != z0 + kBrickZ)
+                                visit_tile(std::true_type{}, measured_tag, std::true_type{});
+                            else
+                                visit_tile(std::true_type{}, measured_tag, std::false_type{});
+                        } else
+                            visit_tile(std::true_type{}, measured_tag, std::false_type{});
+                    } else
+                        visit_tile(std::false_type{}, measured_tag, std::false_type{});
                 } else {
-                    visit_tile(std::false_type{}, std::false_type{});
+                    visit_tile(std::false_type{}, std::false_type{}, std::false_type{});
                 }
             };
             if constexpr (InputsMeasured) {
