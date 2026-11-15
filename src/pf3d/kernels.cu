@@ -2853,7 +2853,9 @@ __global__ void k_repair_after_fatal(UpdateArgs3D args) {
     __syncthreads();
     if (repair == 0) return;
 
-    if (args.S_out != nullptr) {
+    // A parallel repair has already cleared S in this stream. The ordinary
+    // one-block check remains inexpensive when no failure was reported.
+    if (args.S_out != nullptr && gridDim.x == 1) {
         for (std::size_t q = threadIdx.x; q < args.layout.words();
              q += blockDim.x)
             args.S_out[q] = 0u;
@@ -2861,7 +2863,8 @@ __global__ void k_repair_after_fatal(UpdateArgs3D args) {
     }
 
     const std::size_t words = stored_cell_words(args.B, args.storage);
-    for (int slot = 0; slot < args.selection.selected_count(args.N); ++slot) {
+    for (int slot = static_cast<int>(blockIdx.x);
+         slot < args.selection.selected_count(args.N); slot += gridDim.x) {
         const int n = args.selection.cell_index(slot);
         CellState3D* state = &args.cells[n];
         if (cell_is_promoted(*state, args.B)) continue;
@@ -2937,7 +2940,8 @@ __global__ void k_repair_promoted_after_fatal(
     __syncthreads();
     if (repair == 0) return;
 
-    for (int slot = 0; slot < promoted_count; ++slot) {
+    for (int slot = static_cast<int>(blockIdx.x); slot < promoted_count;
+         slot += gridDim.x) {
         const int n = promoted_ids[slot];
         if (n < 0 || n >= args.N || promoted_phi_in[n] == nullptr ||
             promoted_phi_out[n] == nullptr)
@@ -4173,25 +4177,30 @@ cudaError_t sharded_occupancy(int* measurement_blocks_per_sm,
 }  // namespace detail
 
 void launch_repair_after_fatal(const UpdateArgs3D& args,
-                               cudaStream_t stream) {
+                               cudaStream_t stream, bool known_fatal) {
     if (!valid_runtime_field(args.B, args.layout, args.storage) || args.N <= 0 ||
         !args.selection.valid(args.N) ||
         args.phi_in == nullptr || args.cells == nullptr ||
         args.global_flags == nullptr)
         return;
-    k_repair_after_fatal<<<1, kThreads3D, 0, stream>>>(args);
+    // The distributed coordinator has already shared a fatal flag on both
+    // streams. Clear before parallel integer scatter; no new host poll is needed.
+    const int blocks = known_fatal ? std::max(1, args.selection.selected_count(args.N)) : 1;
+    if (blocks > 1 && args.S_out != nullptr)
+        launch_clear_S(args.S_out, args.layout, stream);
+    k_repair_after_fatal<<<blocks, kThreads3D, 0, stream>>>(args);
 }
 
 void launch_repair_promoted_after_fatal(
     const UpdateArgs3D& args, float* const* promoted_phi_in,
     float* const* promoted_phi_out, const int* promoted_ids,
-    int promoted_count, int promoted_edge, cudaStream_t stream) {
+    int promoted_count, int promoted_edge, cudaStream_t stream, bool known_fatal) {
     if (!valid_runtime_field(promoted_edge, args.layout, args.storage) || args.N <= 0 ||
         promoted_phi_in == nullptr || promoted_phi_out == nullptr ||
         promoted_ids == nullptr || promoted_count <= 0 ||
         args.cells == nullptr || args.global_flags == nullptr)
         return;
-    k_repair_promoted_after_fatal<<<1, kThreads3D, 0, stream>>>(
+    k_repair_promoted_after_fatal<<<known_fatal ? promoted_count : 1, kThreads3D, 0, stream>>>(
         args, promoted_phi_in, promoted_phi_out, promoted_ids,
         promoted_count, promoted_edge);
 }

@@ -499,11 +499,12 @@ void launch_apply_cell_motion(const MeasureArgs3D& args,
     int promoted_count, int promoted_edge, bool collect_moments,
     cudaStream_t stream = 0);
 void launch_repair_after_fatal(const UpdateArgs3D& args,
-                               cudaStream_t stream = 0);
+                               cudaStream_t stream = 0, bool known_fatal = false);
 void launch_repair_promoted_after_fatal(
     const UpdateArgs3D& args, float* const* promoted_phi_in,
     float* const* promoted_phi_out, const int* promoted_ids,
-    int promoted_count, int promoted_edge, cudaStream_t stream = 0);
+    int promoted_count, int promoted_edge, cudaStream_t stream = 0,
+    bool known_fatal = false);
 void launch_finalize_origins(CellState3D* cells, int N,
                              std::uint32_t* global_flags,
                              cudaStream_t stream = 0);

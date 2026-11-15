@@ -844,7 +844,7 @@ bool TwoGpuSim3D::distributed_step() {
     for (int f = 0; f < FLAG3D_COUNT; ++f)
         fatal = fatal || (flag3d_is_fatal(static_cast<Flag3D>(f)) && flags_[f] != 0);
     for (int r = 0; r < 2; ++r)
-        if (!select(r) || !sim_[r]->finish_step()) return false;
+        if (!select(r) || !sim_[r]->finish_step(fatal)) return false;
     if (!merge_flags(true)) return false;
     // Coordinate overflow may be discovered while committing origins, after
     // field repair. Such an unrecoverable commit must not publish any output.
@@ -956,10 +956,12 @@ bool TwoGpuSim3D::bench(int steps, double* milliseconds_per_step) {
     // benchmark's accepted-step and recovery guards still apply.
     if (!select(0)) return false;
     if (sim_[0]->options_.bench_phases)
-        std::printf("[two-gpu] primary-device phases only. Fast update phases "
-                    "cover boundary tiles; repair/finalize/scatter includes "
-                    "interior tiles, the exchange join, and pre-commit control; "
-                    "host/output gap includes post-commit control and ownership.\n");
+        std::printf("[two-gpu] primary-device phases only. Measurement phases "
+                    "cover the early cohort; the promoted phase is its unhidden "
+                    "remainder. Fast update phases cover boundary tiles; "
+                    "repair/finalize/scatter includes deferred measurement, "
+                    "interior updates, the exchange join, and pre-commit control. "
+                    "Host/output gap includes post-commit control and ownership.\n");
     return sim_[0]->bench(steps, milliseconds_per_step);
 }
 

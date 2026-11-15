@@ -1597,7 +1597,8 @@ bool Sim3D::reconstruct_current_S() {
 
 bool Sim3D::refresh_measurements(bool apply_tumble,
                                  bool compute_surface,
-                                 bool apply_motion) {
+                                 bool apply_motion,
+                                 bool record_phases) {
     MeasureArgs3D measure{};
     measure.phi = current_phi();
     measure.S = current_S();
@@ -1635,7 +1636,7 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
             std::fprintf(stderr, "[3d] invalid base measurement launch contract\n");
             return false;
         }
-        return phase_mark(1);
+        return !record_phases || phase_mark(1);
     };
     if (promoted_stream == stream_ && !base_measurement()) return false;
     if (active_promoted_count() > 0) {
@@ -1671,7 +1672,7 @@ bool Sim3D::refresh_measurements(bool apply_tumble,
         (!gpu_ok(cudaEventRecord(promoted_measure_done_, promoted_stream), "finish promoted measurement") ||
          !gpu_ok(cudaStreamWaitEvent(stream_, promoted_measure_done_, 0),
             "join promoted measurement"))) return false;
-    if (!phase_mark(2)) return false;
+    if (record_phases && !phase_mark(2)) return false;
     // Motion consumes the accepted-step Philox event exactly once, after all
     // base and promoted cells have refreshed V and interaction moments.
     // Adaptive recovery only remeasures the retained field and deliberately
@@ -1946,7 +1947,9 @@ bool Sim3D::enqueue_interior_update() {
         owned_promoted_count_ = 0;
         const bool full_moment = params_.full_moment_every > 0 &&
             steps_done_ % static_cast<std::uint64_t>(params_.full_moment_every) == 0;
-        const bool measured = refresh_measurements(true, full_moment);
+        // This work belongs to the interior phase; retain the earlier events
+        // that delimit boundary-cohort measurement and motion.
+        const bool measured = refresh_measurements(true, full_moment, true, false);
         selection_ = owned_selection;
         owned_promoted_count_ = promoted_count;
         if (!measured) return false;
@@ -1978,7 +1981,7 @@ bool Sim3D::enqueue_interior_update() {
     return gpu_ok(cudaGetLastError(), "3D interior update launch sequence");
 }
 
-bool Sim3D::finish_step() {
+bool Sim3D::finish_step(bool known_fatal) {
     if (!step_pending_ || pending_update_.tile_pass != UpdateTilePass3D::All) {
         std::fprintf(stderr, "[3d] cannot finish a step before its update\n");
         return false;
@@ -1988,12 +1991,12 @@ bool Sim3D::finish_step() {
     const int next_phi = phi_buffers_ == 2 ? 1 - current_phi_index_
                                          : current_phi_index_;
     const int next_promoted_phi = 1 - current_promoted_phi_index_;
-    launch_repair_after_fatal(update, stream_);
+    launch_repair_after_fatal(update, stream_, known_fatal);
     if (active_promoted_count() > 0)
         launch_repair_promoted_after_fatal(
             update, d_promoted_phi_[current_promoted_phi_index_],
             d_promoted_phi_[next_promoted_phi], active_promoted_ids(),
-            active_promoted_count(), promoted_edge_, stream_);
+            active_promoted_count(), promoted_edge_, stream_, known_fatal);
     launch_finalize_origins(d_cells_, params_.num_cells, d_flags_, stream_);
     // Field/S repair precedes this complete state rollback. Because all work
     // is in one stream, a later queued step snapshots the restored state even

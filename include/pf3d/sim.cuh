@@ -140,12 +140,13 @@ private:
     bool reconstruct_current_S();
     bool refresh_measurements(bool apply_tumble,
                               bool compute_surface = false,
-                              bool apply_motion = true);
+                              bool apply_motion = true,
+                              bool record_phases = true);
     bool ensure_measurements(bool require_surface, const char* context);
     bool launch_one_step();
     bool begin_step(const TileExchangeRegion3D* exchange_region = nullptr);
     bool enqueue_interior_update();
-    bool finish_step();
+    bool finish_step(bool known_fatal = false);
     const int* active_promoted_ids() const;
     int active_promoted_count() const;
     int promoted_update_shards(int promoted_count) const;
