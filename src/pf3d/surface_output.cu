@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <future>
 #include <limits>
 #include <numeric>
 #include <unordered_set>
@@ -401,6 +402,17 @@ struct SurfaceOutput3D::Impl {
         return write(&cell, sizeof(cell), true);
     }
 
+    bool write_payload(const void* stored, std::size_t stored_bytes, std::size_t count,
+                       std::uint32_t checksum, std::uint64_t* stored_total) {
+        surface::ChunkHeader header{};
+        std::memcpy(header.magic, "P3SCHK1", 8);
+        header.vertices = count;
+        header.stored_bytes = stored_bytes;
+        header.checksum = checksum;
+        *stored_total += stored_bytes;
+        return write(&header, sizeof(header), true) && write(stored, stored_bytes, true);
+    }
+
     bool write_chunk(const surface::Vertex* data, std::size_t count, std::uint64_t* stored_total) {
         const std::size_t raw_bytes = count * sizeof(*data);
         const void* stored = data;
@@ -413,14 +425,60 @@ struct SurfaceOutput3D::Impl {
             stored = encoded.data();
         }
 #endif
-        surface::ChunkHeader header{};
-        std::memcpy(header.magic, "P3SCHK1", 8);
-        header.vertices = count;
-        header.stored_bytes = stored_bytes;
-        header.checksum = surface::crc32_update(0, data, raw_bytes);
-        *stored_total += stored_bytes;
-        return write(&header, sizeof(header), true) && write(stored, stored_bytes, true);
+        return write_payload(stored, stored_bytes, count,
+                             surface::crc32_update(0, data, raw_bytes), stored_total);
     }
+
+#ifdef PF_BOUNDARY_ZSTD
+    bool write_compressed_batch(const CapturePlan& plan, int first, int end,
+                                std::uint64_t* stored_total) {
+        struct Chunk {
+            std::size_t offset = 0, size = 0;
+            std::uint32_t checksum = 0;
+        };
+        const auto begin = plan.cell_offsets[first];
+        const auto halfway = begin + (plan.cell_offsets[end] - begin) / 2;
+        int middle = first + 1;
+        while (middle + 1 < end && plan.cell_offsets[middle] < halfway) ++middle;
+        std::vector<Chunk> chunks(end - first);
+        std::size_t capacity = 0;
+        for (int slot = first; slot < end; ++slot) {
+            chunks[slot - first].offset = capacity;
+            const auto count = plan.cell_offsets[slot + 1] - plan.cell_offsets[slot];
+            if (count) capacity += ZSTD_compressBound(static_cast<std::size_t>(count) * sizeof(surface::Vertex));
+        }
+        encoded.resize(capacity);
+        const auto encode = [&](int lo, int hi) {
+            for (int slot = lo; slot < hi; ++slot) {
+                const auto count = plan.cell_offsets[slot + 1] - plan.cell_offsets[slot];
+                if (!count) continue;
+                const auto* data = plan.workspace->host + (plan.cell_offsets[slot] - begin);
+                const auto bytes = static_cast<std::size_t>(count) * sizeof(surface::Vertex);
+                auto& chunk = chunks[slot - first];
+                const auto stored = ZSTD_compress(encoded.data() + chunk.offset,
+                    ZSTD_compressBound(bytes), data, bytes, 1);
+                if (ZSTD_isError(stored)) return fail(ZSTD_getErrorName(stored));
+                chunk.size = stored;
+                chunk.checksum = surface::crc32_update(0, data, bytes);
+            }
+            return true;
+        };
+        // The packed batch remains immutable until both halves finish. Only
+        // the calling thread writes records, preserving chunk order and CRCs.
+        auto worker = std::async(std::launch::async, [&] { return encode(middle, end); });
+        const bool first_ok = encode(first, middle);
+        const bool second_ok = worker.get();
+        if (!first_ok || !second_ok) return false;
+        for (int slot = first; slot < end; ++slot) {
+            const auto count = plan.cell_offsets[slot + 1] - plan.cell_offsets[slot];
+            if (!write_cell(plan.states[plan.ids[slot]], plan.view.base_edge, count)) return false;
+            const auto& chunk = chunks[slot - first];
+            if (count && !write_payload(encoded.data() + chunk.offset, chunk.size,
+                    static_cast<std::size_t>(count), chunk.checksum, stored_total)) return false;
+        }
+        return true;
+    }
+#endif
 
     bool pack_range(CapturePlan& plan, int first, int end,
                     std::uint64_t begin_vertex, std::uint64_t end_vertex) {
@@ -461,6 +519,14 @@ struct SurfaceOutput3D::Impl {
             while (end < selected && plan.cell_offsets[end + 1] - begin <= kBatchVertices) ++end;
             const auto stop = plan.cell_offsets[end];
             if (stop > begin && !pack_range(plan, first, end, begin, stop)) return false;
+#ifdef PF_BOUNDARY_ZSTD
+            // Compress only the current bounded batch before reusing its buffer.
+            if (compress && end - first > 1 && (stop - begin) * sizeof(surface::Vertex) >= 1048576) {
+                if (!write_compressed_batch(plan, first, end, stored_total)) return false;
+                first = end;
+                continue;
+            }
+#endif
             for (int slot = first; slot < end; ++slot) {
                 const auto count = plan.cell_offsets[slot + 1] - plan.cell_offsets[slot];
                 if (!write_cell(plan.states[plan.ids[slot]], plan.view.base_edge, count)) return false;

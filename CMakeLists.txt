@@ -140,6 +140,7 @@ if(PF_BUILD_3D)
     src/pf3d/relaxation_output.cu src/output_file.cpp)
   target_include_directories(pf3d_boundary PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/common)
+  target_link_libraries(pf3d_boundary PRIVATE Threads::Threads)
   pf_cuda_target(pf3d_boundary)
   pf_optional_zstd(pf3d_boundary)
 
