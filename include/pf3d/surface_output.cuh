@@ -39,7 +39,7 @@ public:
     SurfaceOutput3D& operator=(const SurfaceOutput3D&) = delete;
 
     bool open(const std::string& path, const SimParams3D& params,
-              std::uint64_t interval, bool compress);
+              std::uint64_t interval, bool compress, int compression_threads = 2);
     bool capture(const std::vector<SurfaceDeviceView3D>& views,
                  std::uint64_t step, double time);
     bool close(bool complete = true);

@@ -10,6 +10,7 @@
 #include "pf3d/surface_output.cuh"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -278,6 +279,7 @@ struct SurfaceOutput3D::Impl {
     std::FILE* file = nullptr;
     SimParams3D params{};
     bool compress = false, failed = false, closed = false;
+    int compression_threads = 2;
     std::uint64_t frames = 0, last_step = 0, frame_crc = 0;
     std::vector<std::int64_t> identity;
     std::vector<std::unique_ptr<DeviceWorkspace>> workspaces;
@@ -437,9 +439,16 @@ struct SurfaceOutput3D::Impl {
             std::uint32_t checksum = 0;
         };
         const auto begin = plan.cell_offsets[first];
-        const auto halfway = begin + (plan.cell_offsets[end] - begin) / 2;
-        int middle = first + 1;
-        while (middle + 1 < end && plan.cell_offsets[middle] < halfway) ++middle;
+        const int threads = std::min(compression_threads, end - first);
+        std::array<int, 5> cuts{};
+        cuts[0] = first; cuts[threads] = end;
+        // Balance bytes while leaving at least one cell in every range.
+        for (int worker = 1; worker < threads; ++worker) {
+            const auto target = begin + (plan.cell_offsets[end] - begin) * worker / threads;
+            int middle = cuts[worker - 1] + 1;
+            while (middle + threads - worker < end && plan.cell_offsets[middle] < target) ++middle;
+            cuts[worker] = middle;
+        }
         std::vector<Chunk> chunks(end - first);
         std::size_t capacity = 0;
         for (int slot = first; slot < end; ++slot) {
@@ -463,12 +472,16 @@ struct SurfaceOutput3D::Impl {
             }
             return true;
         };
-        // The packed batch remains immutable until both halves finish. Only
+        // The packed batch remains immutable until all threads finish. Only
         // the calling thread writes records, preserving chunk order and CRCs.
-        auto worker = std::async(std::launch::async, [&] { return encode(middle, end); });
-        const bool first_ok = encode(first, middle);
-        const bool second_ok = worker.get();
-        if (!first_ok || !second_ok) return false;
+        std::array<std::future<bool>, 3> tasks;
+        for (int worker = 1; worker < threads; ++worker)
+            tasks[worker - 1] = std::async(std::launch::async,
+                [&, worker] { return encode(cuts[worker], cuts[worker + 1]); });
+        bool ok = encode(cuts[0], cuts[1]);
+        for (int worker = 1; worker < threads; ++worker)
+            if (!tasks[worker - 1].get()) ok = false;
+        if (!ok) return false;
         for (int slot = first; slot < end; ++slot) {
             const auto count = plan.cell_offsets[slot + 1] - plan.cell_offsets[slot];
             if (!write_cell(plan.states[plan.ids[slot]], plan.view.base_edge, count)) return false;
@@ -586,9 +599,10 @@ SurfaceOutput3D::SurfaceOutput3D() = default;
 SurfaceOutput3D::~SurfaceOutput3D() = default;
 
 bool SurfaceOutput3D::open(const std::string& path, const SimParams3D& params,
-                          std::uint64_t interval, bool compress) {
+                          std::uint64_t interval, bool compress, int compression_threads) {
     const std::uint16_t endian = 1;
     if (impl_ || path.empty() || interval == 0 || params.num_cells <= 0 ||
+        compression_threads < 1 || compression_threads > 4 ||
         params.Nx <= 0 || params.Ny <= 0 || params.Nz <= 0 ||
         !(params.periodic_xyz() || params.bounded_z()) ||
         !std::isfinite(params.dt) || params.dt <= 0 ||
@@ -602,6 +616,7 @@ bool SurfaceOutput3D::open(const std::string& path, const SimParams3D& params,
         impl_ = std::make_unique<Impl>();
         auto& out = *impl_;
         out.params = params; out.compress = compress;
+        out.compression_threads = compression_threads;
         out.file = create_exclusive(path);
         if (!out.file) { out.failed = true; std::perror("[surface3d] create new file"); return false; }
         surface::FileHeader h{};

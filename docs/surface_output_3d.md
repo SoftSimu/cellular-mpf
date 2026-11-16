@@ -36,9 +36,10 @@ therefore applies backpressure; frames are not silently dropped.
 The device packing buffer and matching pinned host buffer are each bounded by
 64 MiB **per participating GPU**, plus small count/metadata arrays. CPU compression
 uses one additional buffer sized to the current batch's compressed-size bounds.
-Large batches use one temporary CPU worker; records are written in their original
-order after both halves finish. On the tested two-GH200 configuration, request
-four CPU cores so the two compression threads can run on neighbouring cores.
+Large batches use two CPU threads by default. `--surface-compression-threads`
+selects one to four threads without changing the stored bytes or chunk order.
+For the tested two-GH200 configuration, request four CPU cores for two compression
+threads, or eight CPU cores for four threads; the allocation spans two host CPUs.
 Large cells are split into chunks;
 there is no full-brick host copy or per-voxel flag allocation. These are output
 buffers, not a narrow-band approximation to the dynamics. The current CUDA launch

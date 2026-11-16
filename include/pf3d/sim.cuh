@@ -96,6 +96,7 @@ struct RunOptions3D {
     std::string surface_path;
     long long surface_interval = 0;
     bool surface_compress = false;
+    int surface_compression_threads = 2;
     std::string relaxation_path;
     long long relaxation_interval = 0;
     long long relaxation_dense_every = 0;

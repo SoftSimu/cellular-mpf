@@ -132,9 +132,10 @@ void usage(const char* program) {
         "\n"
         "three-dimensional interfaces (off by default)\n"
         "  --surface-out <path>      new lossless phi=0.5 sample stream\n"
+        "                            new segment file on every restart\n"
         "  --surface-interval <n>    cadence in accepted steps; required\n"
         "  --surface-compression <none|zstd> optional zstd build      (none)\n"
-        "                            new segment file on every restart\n"
+        "  --surface-compression-threads <1..4> CPU threads for zstd (2)\n"
         "\n"
         "spatial relaxation output (substrate slab only, off by default)\n"
         "  --relaxation-out <path>   new binary segment of independent centroid rates\n"
@@ -706,7 +707,8 @@ OptionStatus parse_surface_option(int argc, char** argv, int* index,
                                   const char* argument, ParsedCommand* command) {
     if (std::strcmp(argument, "--surface-out") != 0 &&
         std::strcmp(argument, "--surface-interval") != 0 &&
-        std::strcmp(argument, "--surface-compression") != 0)
+        std::strcmp(argument, "--surface-compression") != 0 &&
+        std::strcmp(argument, "--surface-compression-threads") != 0)
         return OptionStatus::Unrecognized;
     command->surface_options_supplied = true;
     const char* value = value_after(argc, argv, index, argument);
@@ -716,6 +718,10 @@ OptionStatus parse_surface_option(int argc, char** argv, int* index,
     else if (std::strcmp(argument, "--surface-interval") == 0) {
         if (!parse_integer(argument, value, 1, 1000000000000LL, &options.surface_interval))
             return OptionStatus::Error;
+    } else if (std::strcmp(argument, "--surface-compression-threads") == 0) {
+        long long threads = 0;
+        if (!parse_integer(argument, value, 1, 4, &threads)) return OptionStatus::Error;
+        options.surface_compression_threads = static_cast<int>(threads);
     } else if (std::strcmp(value, "none") == 0) options.surface_compress = false;
     else if (std::strcmp(value, "zstd") == 0) options.surface_compress = true;
     else {

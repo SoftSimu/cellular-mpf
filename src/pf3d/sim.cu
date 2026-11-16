@@ -1471,7 +1471,8 @@ bool Sim3D::initialize_common() {
         surface_output_ = std::make_unique<SurfaceOutput3D>();
         if (!surface_output_->open(options_.surface_path, params_,
                 static_cast<std::uint64_t>(options_.surface_interval),
-                options_.surface_compress) || !append_surface()) return false;
+                options_.surface_compress, options_.surface_compression_threads) ||
+            !append_surface()) return false;
     }
     if (!options_.relaxation_path.empty()) {
         std::string metadata = trajectory_header(params_, B_, options_.promoted_measure_shards,
